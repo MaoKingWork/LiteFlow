@@ -2,17 +2,23 @@
 
 导入本包即自动注册所有内置 Tool 到全局 ``ToolRegistry``:
 
-    - DBQueryTool  (name="db.query",  role="source")
-    - HTTPTool     (name="http.request", role="source")
-    - WeComSink    (name="sink.wecom",   role="sink")
-    - WebhookSink  (name="sink.webhook", role="sink")
+    - DBQueryTool   (name="db.query",     role="source")
+    - HTTPTool      (name="http.request", role="source")
+    - TimeNowTool   (name="time.now",     role="action")
+    - FileReadTool  (name="file.read",    role="source")
+    - FileWriteTool (name="file.write",   role="sink")
+    - FileListTool  (name="file.list",    role="source")
+    - WeComSink     (name="sink.wecom",   role="sink")
+    - WebhookSink   (name="sink.webhook", role="sink")
 """
 
 # 导入各工具模块,触发 @tool 装饰器注册到全局 ToolRegistry
 from agentkit.tools.base import Tool, register, get_tool, list_tools
 from agentkit.tools.db import DBQueryTool
+from agentkit.tools.file import FileListTool, FileReadTool, FileWriteTool
 from agentkit.tools.http import HTTPTool
 from agentkit.tools.sinks import WeComSink, WebhookSink
+from agentkit.tools.time import TimeNowTool
 
 __all__ = [
     "Tool",
@@ -21,6 +27,10 @@ __all__ = [
     "list_tools",
     "DBQueryTool",
     "HTTPTool",
+    "TimeNowTool",
+    "FileReadTool",
+    "FileWriteTool",
+    "FileListTool",
     "WeComSink",
     "WebhookSink",
 ]
