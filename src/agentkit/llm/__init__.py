@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 from agentkit.llm.base import (
+    ChatChunk,
     LLMClient,
     LLMMessage,
     LLMResponse,
@@ -53,6 +54,7 @@ __all__ = [
     "LLMResponse",
     "LLMUsage",
     "ToolCall",
+    "ChatChunk",
     # 客户端实现
     "OpenAIClient",
     "DeepSeekClient",

@@ -90,29 +90,20 @@ class DeepSeekClient(OpenAIClient):
     # ------------------------------------------------------------------
     # 请求体组装(覆盖父类,注入 DeepSeek 特有参数)
     # ------------------------------------------------------------------
-    async def chat(
+    def _build_body(
         self,
         messages: list[LLMMessage],
+        tools: list[dict] | None,
+        temperature: float,
+        model: str | None,
         *,
-        tools: list[dict] | None = None,
-        temperature: float = 0.2,
-        model: str | None = None,
-    ) -> LLMResponse:
-        """调用 DeepSeek Chat Completions,注入 thinking / JSON Output 等参数。
+        stream: bool = False,
+    ) -> dict[str, Any]:
+        """覆盖：注入 thinking / reasoning_effort / JSON Output 参数。
 
-        与 ``OpenAIClient.chat`` 的区别:
-            - 注入 ``thinking`` / ``reasoning_effort``(通过 extra_body)。
-            - ``options.json_output`` 为 True 时注入 ``response_format``。
-            - thinking=enabled 时移除 temperature(思考模式不生效)。
-            - 解析响应中的 ``reasoning_content``。
+        ``chat`` 与 ``chat_stream`` 均通过此方法组装请求体，自动继承 DeepSeek
+        特有优化。thinking=enabled 时移除 temperature（思考模式不生效）。
         """
-        if not self.api_key:
-            raise RuntimeError(
-                "DeepSeekClient 缺少 api_key:未显式传入且环境变量 "
-                "DEEPSEEK_API_KEY 未设置。"
-            )
-
-        # 组装请求体
         body: dict[str, Any] = {
             "model": model or self.model or "deepseek-v4-pro",
             "messages": [self._message_to_dict(m) for m in messages],
@@ -128,7 +119,6 @@ class DeepSeekClient(OpenAIClient):
         if not thinking_enabled:
             body["temperature"] = temperature
 
-        # tools 非空才加入
         if tools:
             body["tools"] = tools
 
@@ -145,22 +135,18 @@ class DeepSeekClient(OpenAIClient):
         if extra_body:
             body["extra_body"] = extra_body
 
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        if stream:
+            body["stream"] = True
+            body["stream_options"] = {"include_usage": True}
+        return body
 
-        url = f"{self.base_url.rstrip('/')}/chat/completions"
-        resp = await self._client.post(url, json=body, headers=headers)
-
-        if resp.status_code < 200 or resp.status_code >= 300:
+    async def _ensure_api_key(self) -> None:
+        """覆盖：DeepSeek 专用错误信息。"""
+        if not self.api_key:
             raise RuntimeError(
-                f"DeepSeek Chat Completions 请求失败: HTTP {resp.status_code}, "
-                f"body={resp.text}"
+                "DeepSeekClient 缺少 api_key:未显式传入且环境变量 "
+                "DEEPSEEK_API_KEY 未设置。"
             )
-
-        data = resp.json()
-        return self._parse_response(data)
 
     # ------------------------------------------------------------------
     # 消息格式转换(覆盖父类,处理 reasoning_content 多轮拼接)

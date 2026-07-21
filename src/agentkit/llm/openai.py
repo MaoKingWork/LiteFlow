@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 
 from agentkit.config import get_default
 from agentkit.llm.base import (
+    ChatChunk,
     LLMClient,
     LLMMessage,
     LLMResponse,
@@ -131,6 +133,57 @@ class OpenAIClient(LLMClient):
         return {"role": msg.role, "content": msg.content}
 
     # ------------------------------------------------------------------
+    # 请求组装(子类可覆盖 _build_body 注入特有参数)
+    # ------------------------------------------------------------------
+    def _headers(self) -> dict[str, str]:
+        """请求头。子类可覆盖以追加特有头(如 DeepSeek 无额外头)。"""
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+    def _build_body(
+        self,
+        messages: list[LLMMessage],
+        tools: list[dict] | None,
+        temperature: float,
+        model: str | None,
+        *,
+        stream: bool = False,
+    ) -> dict[str, Any]:
+        """组装 Chat Completions 请求体。
+
+        子类（如 ``DeepSeekClient``）覆盖此方法注入特有参数（thinking /
+        response_format 等），``chat`` / ``chat_stream`` 共用此方法。
+
+        Args:
+            stream: 是否流式。为 True 时注入 ``stream=True``。
+        """
+        body: dict[str, Any] = {
+            "model": model or self.model or "gpt-4o-mini",
+            "messages": [self._message_to_dict(m) for m in messages],
+            "temperature": temperature,
+        }
+        if tools:
+            body["tools"] = tools
+        if stream:
+            body["stream"] = True
+            # 流式 + usage 末尾返回(OpenAI 2.5+ 支持,DeepSeek 也支持)
+            body["stream_options"] = {"include_usage": True}
+        return body
+
+    def _url(self) -> str:
+        """Chat Completions 端点 URL。"""
+        return f"{self.base_url.rstrip('/')}/chat/completions"
+
+    async def _ensure_api_key(self) -> None:
+        """延迟校验 api_key。"""
+        if not self.api_key:
+            raise RuntimeError(
+                "OpenAIClient 缺少 api_key：未显式传入且环境变量 OPENAI_API_KEY 未设置。"
+            )
+
+    # ------------------------------------------------------------------
     # LLMClient 接口实现
     # ------------------------------------------------------------------
     async def chat(
@@ -141,46 +194,132 @@ class OpenAIClient(LLMClient):
         temperature: float = 0.2,
         model: str | None = None,
     ) -> LLMResponse:
-        """调用 OpenAI Chat Completions。
+        """调用 OpenAI Chat Completions（非流式）。
 
         详见 ``LLMClient.chat`` 的接口契约。本实现将 ``LLMMessage`` 转为 OpenAI
         格式，发送 POST 请求并解析响应为 ``LLMResponse``。
         """
-        # 延迟校验 api_key：允许构造时未配置，但真正调用时必须有
-        if not self.api_key:
-            raise RuntimeError(
-                "OpenAIClient 缺少 api_key：未显式传入且环境变量 OPENAI_API_KEY 未设置。"
-            )
-
-        # 组装请求体
-        body: dict[str, Any] = {
-            "model": model or self.model or "gpt-4o-mini",
-            "messages": [self._message_to_dict(m) for m in messages],
-            "temperature": temperature,
-        }
-        # tools 非空才加入（OpenAI 不接受空列表语义）
-        if tools:
-            body["tools"] = tools
-
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-
-        url = f"{self.base_url.rstrip('/')}/chat/completions"
-
-        # 发送请求；网络层错误（连接失败、超时等）原样上抛
-        resp = await self._client.post(url, json=body, headers=headers)
-
-        # HTTP 非 2xx 抛 RuntimeError 并附带响应体，便于排查
+        await self._ensure_api_key()
+        body = self._build_body(messages, tools, temperature, model, stream=False)
+        resp = await self._client.post(self._url(), json=body, headers=self._headers())
         if resp.status_code < 200 or resp.status_code >= 300:
             raise RuntimeError(
                 f"OpenAI Chat Completions 请求失败: HTTP {resp.status_code}, "
                 f"body={resp.text}"
             )
+        return self._parse_response(resp.json())
 
-        data = resp.json()
-        return self._parse_response(data)
+    async def chat_stream(
+        self,
+        messages: list[LLMMessage],
+        *,
+        tools: list[dict] | None = None,
+        temperature: float = 0.2,
+        model: str | None = None,
+    ) -> AsyncIterator[ChatChunk]:
+        """调用 OpenAI Chat Completions 流式接口（SSE）。
+
+        解析 SSE 增量：
+            - ``delta.content`` 实时 yield（文本片段）
+            - ``delta.tool_calls`` 按 ``index`` 累积分片，流末尾一次性 yield 完整列表
+            - 末尾 chunk 携带 ``finish_reason`` 与 ``usage``
+        """
+        await self._ensure_api_key()
+        body = self._build_body(messages, tools, temperature, model, stream=True)
+
+        # tool_calls 分片累积器：index -> {id, name, arguments_str}
+        # OpenAI SSE 协议：每个 tool_call 分片含 index（第几个工具调用），
+        # arguments 为 JSON 字符串片段，需按 index 拼接得到完整 arguments。
+        tc_acc: dict[int, dict[str, Any]] = {}
+        finish_reason: str | None = None
+        usage: LLMUsage | None = None
+
+        async with self._client.stream(
+            "POST", self._url(), json=body, headers=self._headers()
+        ) as response:
+            if response.status_code < 200 or response.status_code >= 300:
+                body_text = await response.aread()
+                raise RuntimeError(
+                    f"OpenAI Chat Completions 流式请求失败: "
+                    f"HTTP {response.status_code}, body={body_text.decode('utf-8', 'replace')}"
+                )
+            async for line in response.aiter_lines():
+                # SSE 格式：每行形如 "data: {...}" 或 "data: [DONE]"
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue  # 跳过无法解析的行（部分实现会发空行/注释）
+
+                # 解析 choices[0].delta
+                choices = chunk.get("choices") or []
+                delta: dict[str, Any] = (
+                    choices[0].get("delta") if choices else {}
+                ) or {}
+
+                # 1. 文本增量：实时 yield
+                delta_content = delta.get("content")
+                if delta_content:
+                    yield ChatChunk(delta_content=delta_content, raw=chunk)
+
+                # 2. tool_calls 分片：按 index 累积
+                for raw_tc in delta.get("tool_calls") or []:
+                    idx = raw_tc.get("index", 0)
+                    slot = tc_acc.setdefault(
+                        idx, {"id": "", "name": "", "arguments": ""}
+                    )
+                    func = raw_tc.get("function") or {}
+                    if raw_tc.get("id"):
+                        slot["id"] = raw_tc["id"]
+                    if func.get("name"):
+                        slot["name"] = func["name"]
+                    if func.get("arguments"):
+                        slot["arguments"] += func["arguments"]
+
+                # 3. finish_reason（末尾 chunk）
+                if choices:
+                    fr = choices[0].get("finish_reason")
+                    if fr:
+                        finish_reason = fr
+
+                # 4. usage（末尾 chunk，需 stream_options.include_usage=True）
+                if chunk.get("usage"):
+                    raw_u = chunk["usage"]
+                    usage = LLMUsage(
+                        prompt_tokens=int(raw_u.get("prompt_tokens", 0)),
+                        completion_tokens=int(raw_u.get("completion_tokens", 0)),
+                        total_tokens=int(raw_u.get("total_tokens", 0)),
+                    )
+
+        # 流末尾：yield 完整 tool_calls + finish_reason + usage。
+        # OpenAI SSE 总会在末尾发 finish_reason chunk，故末尾 chunk 总会 yield。
+        tool_calls: list[ToolCall] | None = None
+        if tc_acc:
+            tool_calls = []
+            for idx in sorted(tc_acc.keys()):
+                slot = tc_acc[idx]
+                # arguments 解析失败降级为空 dict（与非流式 _parse_response 一致）
+                try:
+                    arguments: dict = (
+                        json.loads(slot["arguments"])
+                        if slot["arguments"]
+                        else {}
+                    )
+                except (json.JSONDecodeError, TypeError):
+                    arguments = {}
+                tool_calls.append(
+                    ToolCall(id=slot["id"], name=slot["name"], arguments=arguments)
+                )
+
+        yield ChatChunk(
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+            usage=usage,
+        )
 
     @staticmethod
     def _parse_response(data: dict[str, Any]) -> LLMResponse:

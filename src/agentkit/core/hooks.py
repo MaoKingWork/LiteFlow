@@ -139,6 +139,71 @@ class LifecycleHooks(ABC):
         """
         ...
 
+    # ------------------------------------------------------------------
+    # 流式输出回调
+    # ------------------------------------------------------------------
+    # 三个方法构成"流式生命周期",调用契约:
+    #   on_llm_stream_start → on_llm_stream_delta(多次) → on_llm_stream_end
+    # 每次 LLM 流式调用(含 retry / 降级模型)都触发完整一轮。
+    # ``attempt`` 参数标识第几次尝试(0=首次, 1+=retry/降级),前端据此
+    # 重置缓冲,避免拼接上一次失败的废文本。
+    async def on_llm_stream_start(
+        self,
+        step: "BaseStep",
+        agent: "AgentConfig",
+        *,
+        attempt: int = 0,
+    ) -> None:
+        """单次流式 LLM 调用开始(含 retry / 降级模型)。
+
+        前端消费者应据此**重置缓冲**——上一次 attempt 的文本视为废文本。
+        典型实现:清空 SSE 队列、重置终端行、记录"重新生成中"状态。
+
+        Args:
+            step:    发起流式调用的 Step。
+            agent:   发起调用的 AgentConfig。
+            attempt: 第几次尝试。0=首次调用,1+=解析失败后的重试或降级模型。
+        """
+        ...
+
+    async def on_llm_stream_delta(
+        self,
+        step: "BaseStep",
+        agent: "AgentConfig",
+        delta: str,
+        accumulated: str,
+        *,
+        attempt: int = 0,
+    ) -> None:
+        """流式文本片段。
+
+        Args:
+            step:        发起流式调用的 Step。
+            agent:       发起调用的 AgentConfig。
+            delta:       本次增量文本。
+            accumulated: 本次 attempt 内的累计文本(retry 时已重置)。
+            attempt:     第几次尝试(同 on_llm_stream_start)。
+        """
+        ...
+
+    async def on_llm_stream_end(
+        self,
+        step: "BaseStep",
+        agent: "AgentConfig",
+        full_content: str,
+        *,
+        attempt: int = 0,
+    ) -> None:
+        """单次流式 LLM 调用结束。
+
+        Args:
+            step:         发起流式调用的 Step。
+            agent:        发起调用的 AgentConfig。
+            full_content: 本次 attempt 的完整文本(等同末尾 accumulated)。
+            attempt:      第几次尝试(同 on_llm_stream_start)。
+        """
+        ...
+
     async def on_tool_call(
         self, tool: Any, params: dict, result: Any
     ) -> None:
@@ -635,6 +700,41 @@ class CompositeHooks(LifecycleHooks):
     ) -> None:
         for h in self.hooks:
             await h.on_llm_call(agent, prompt, response, usage)
+
+    async def on_llm_stream_start(
+        self,
+        step: "BaseStep",
+        agent: "AgentConfig",
+        *,
+        attempt: int = 0,
+    ) -> None:
+        for h in self.hooks:
+            await h.on_llm_stream_start(step, agent, attempt=attempt)
+
+    async def on_llm_stream_delta(
+        self,
+        step: "BaseStep",
+        agent: "AgentConfig",
+        delta: str,
+        accumulated: str,
+        *,
+        attempt: int = 0,
+    ) -> None:
+        for h in self.hooks:
+            await h.on_llm_stream_delta(
+                step, agent, delta, accumulated, attempt=attempt
+            )
+
+    async def on_llm_stream_end(
+        self,
+        step: "BaseStep",
+        agent: "AgentConfig",
+        full_content: str,
+        *,
+        attempt: int = 0,
+    ) -> None:
+        for h in self.hooks:
+            await h.on_llm_stream_end(step, agent, full_content, attempt=attempt)
 
     async def on_tool_call(
         self, tool: Any, params: dict, result: Any

@@ -16,11 +16,13 @@
     - ``ToolCall``:    一次 Function Call 调用（LLM 请求执行工具）
     - ``LLMResponse``: 一次 LLM 调用的完整响应
     - ``LLMMessage``:  对话消息（system / user / assistant / tool）
+    - ``ChatChunk``:   流式输出的单个片段
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -86,6 +88,44 @@ class LLMResponse:
 
 
 @dataclass
+class ChatChunk:
+    """流式输出的单个片段。
+
+    流式调用（``LLMClient.chat_stream``）按 SSE 顺序 yield 本类实例。
+
+    字段语义：
+        - ``delta_content``: 文本增量。实时推送，调用方累加得到完整文本。
+          中间片段仅有此字段。
+        - ``tool_calls``: **完整**工具调用列表。客户端在流式过程中按 ``index``
+          累积分片（拼接 ``arguments`` JSON 字符串），**仅在流末尾 chunk** 携带。
+          调用方无需做分片合并。
+        - ``finish_reason`` / ``usage``: 通常仅出现在流末尾 chunk。
+
+    设计说明：
+        - 故意不包含 ``delta_reasoning_content``。DeepSeek 等模型的思考链分片
+          不通过流式 hook 推送（思考链是模型内部状态，暴露给前端有 prompt
+          injection 风险；且该需求属少数派）。未来需要时可扩展字段并新增
+          hook 方法，不破坏现有契约。
+        - ``tool_calls`` 选择"客户端累积、末尾一次交付"而非"分片实时推送"，
+          因为调用方（LLMStep）只在流结束后判定"是否工具轮"，无需实时观察
+          tool_calls 拼接过程。这样简化了所有调用方。
+
+    Attributes:
+        delta_content:  文本增量。None 表示本片段无文本。
+        tool_calls:     完整工具调用列表（仅末尾 chunk）。None 表示无工具调用。
+        finish_reason:  流结束原因（仅末尾 chunk）。
+        usage:          token 用量（通常仅末尾 chunk）。
+        raw:            原始 SSE chunk（调试用）。
+    """
+
+    delta_content: str | None = None
+    tool_calls: list[ToolCall] | None = None
+    finish_reason: str | None = None
+    usage: LLMUsage | None = None
+    raw: Any = None
+
+
+@dataclass
 class LLMMessage:
     """对话消息。
 
@@ -122,6 +162,9 @@ class LLMClient(ABC):
         - ``chat`` 为协程，支持异步并发调用。
         - ``tools`` 参数遵循 OpenAI Function Call JSON Schema 约定。
         - 返回 ``LLMResponse``，其中 ``raw`` 保留原始响应便于调试。
+        - ``chat_stream`` 有默认实现（退化为 ``chat`` 一次性返回），
+          子类按需覆盖以提供真流式。``MockClient`` 等简单实现可零成本
+          满足接口契约。
     """
 
     @abstractmethod
@@ -133,7 +176,7 @@ class LLMClient(ABC):
         temperature: float = 0.2,
         model: str | None = None,
     ) -> LLMResponse:
-        """调用 LLM 完成一次 Chat Completions。
+        """调用 LLM 完成一次 Chat Completions（非流式）。
 
         Args:
             messages:    对话消息列表（system / user / assistant / tool）。
@@ -148,11 +191,52 @@ class LLMClient(ABC):
             LLMResponse: LLM 的响应。
         """
 
+    async def chat_stream(
+        self,
+        messages: list[LLMMessage],
+        *,
+        tools: list[dict] | None = None,
+        temperature: float = 0.2,
+        model: str | None = None,
+    ) -> AsyncIterator[ChatChunk]:
+        """调用 LLM 流式输出（SSE）。
+
+        默认实现：退化为 ``chat`` 一次性获取，包装成单个 ``ChatChunk`` yield。
+        子类覆盖此方法以提供真流式（如 ``OpenAIClient`` 解析 SSE 增量推送）。
+
+        默认实现保证：未覆盖 ``chat_stream`` 的子类（如 ``MockClient``）
+        仍满足接口契约，``LLMStep`` 可无差别调用 ``chat_stream`` 而不必关心
+        客户端是否真支持流式。
+
+        Args:
+            messages:    对话消息列表。
+            tools:       Function Call 工具 schema；None 表示不启用工具。
+            temperature: 采样温度。
+            model:       模型名覆盖。
+
+        Yields:
+            ChatChunk: 流式片段。默认实现仅 yield 一个含完整响应的 chunk。
+        """
+        resp = await self.chat(
+            messages,
+            tools=tools,
+            temperature=temperature,
+            model=model,
+        )
+        yield ChatChunk(
+            delta_content=resp.content,
+            tool_calls=resp.tool_calls or None,
+            finish_reason=resp.finish_reason or None,
+            usage=resp.usage,
+            raw=resp.raw,
+        )
+
 
 __all__ = [
     "LLMUsage",
     "ToolCall",
     "LLMResponse",
     "LLMMessage",
+    "ChatChunk",
     "LLMClient",
 ]

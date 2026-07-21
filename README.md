@@ -6,6 +6,9 @@
 
 - **双层架构**：YAML 声明式配置 + Python SDK，按需选择抽象层级
 - **6 种 Step 类型**：tool / llm / condition / loop / parallel / skill，覆盖常见编排场景
+- **声明式输出解析**：LLMStep 支持 `output_format: text | json`，配合 `output_model` 实现"文本/JSON/Schema 校验"三级解析，复用解析失败→修复重试→降级模型完整保障链
+- **流式输出**：LLMStep `stream: true` 启用 SSE 流式，通过 `on_llm_stream_*` 钩子实时推送文本增量；retry/降级模型通过 `attempt` 参数标识，前端据此重置缓冲。流式与契约链正交，解析/重试/降级语义不变
+- **不可变 Context 与生态互操作**：`FrozenDict` 继承 `collections.abc.Mapping`，与 jsonschema / requests / ORM 等检查 Mapping 的库零摩擦集成；`to_mutable()` 提供递归解冻入口
 - **模板引擎**：`{{var}}` 变量替换、`${ENV}` 环境变量、`{{#if}}`/`{{#each}}` 条件与循环
 - **可观测性开箱即用**：自动装配日志与 Token 计量 Hooks，Step 级耗时与失败链可视化
 - **LLM 客户端生命周期托管**：`async with` 自动关闭连接，避免泄漏
@@ -135,7 +138,7 @@ asyncio.run(main())
 | **Skill** | 能力包：系统提示词 + 输出模型 + 专属工具的封装 | `SkillManifest` |
 | **MCP** | 外部 MCP Server 连接管理与工具自动发现注册 | `MCPManager` |
 | **Step** | 执行单元，6 种类型，含钩子/超时/重试/trace 编排 | `BaseStep` |
-| **Context** | 工作流共享状态，支持快照/恢复与 trace 记录 | `Context` |
+| **Context** | 不可变工作流共享状态（`FrozenDict` 兼容 `Mapping`），支持快照/恢复与 trace 记录 | `Context` |
 | **Workflow** | 编排器，管理 Step 序列执行、检查点、资源生命周期 | `Workflow` |
 | **Hooks** | 生命周期钩子，提供日志、Token 计量等可观测性 | `LifecycleHooks` |
 
@@ -158,7 +161,7 @@ asyncio.run(main())
 
 ### llm — LLM 调用
 
-调用 LLM 生成文本，支持 Function Call 多轮对话。`prompt` 为用户提示词模板（支持变量替换与块语法）。
+调用 LLM 生成文本，支持 Function Call 多轮对话、声明式输出解析与流式输出。
 
 ```yaml
 - id: analyze
@@ -169,9 +172,37 @@ asyncio.run(main())
     数据: {{orders_raw}}
     请生成摘要。
   output: analysis
+  # output_format: text | json   # 默认 text
+  # stream: true                 # 启用流式输出（默认 false）
 ```
 
-> **字段说明**：`prompt` 为规范字段名。旧版使用的 `input` 字段仍向后兼容，但会触发 `DeprecationWarning`，建议迁移至 `prompt`。
+**输出解析优先级**（高→低）：
+
+| 配置 | 解析器 | 输出类型 | 适用场景 |
+|------|--------|----------|----------|
+| `agent.output_model` | `PydanticParser` | pydantic 模型实例 | 严格 schema 校验，定义在 agent 段 |
+| `output_format: json` | `JSONParser` | `dict` / `list` / 标量 | 需 JSON 但无 schema 约束 |
+| `output_format: text`（默认） | `TextParser` | `str` | 自由文本 |
+
+三级解析器均复用 LLMStep 输出契约保障链：解析失败→生成 retry_hint→重试→降级模型→`on_exhausted` 决策。**流式不改变契约链语义**——流式期间累积完整文本，解析/重试/降级仍按完整文本执行。
+
+```yaml
+# JSON 输出示例：下游 Step 通过 {{facts}} 直接拿到 dict
+- id: structure
+  type: llm
+  agent: structurer
+  prompt: "把 {{raw}} 整理为 JSON"
+  output: facts
+  output_format: json
+
+- id: render
+  type: tool
+  tool: report.render
+  params:
+    data: "{{facts}}"    # 直接传 dict，无需中转 json_parse
+```
+
+> **字段说明**：`prompt` 为规范字段名。旧版使用的 `input` 字段仍向后兼容，但会触发 `DeprecationWarning`，建议迁移至 `prompt`。流式输出详见 [流式输出](#流式输出) 章节。
 
 ### condition — 条件分支
 
@@ -336,6 +367,142 @@ ${WECOM_WEBHOOK}    # 运行时从 os.environ 取值
 
 模板引擎使用 AST 解析进行表达式求值，不调用 `eval()`，避免代码注入风险。
 
+## Context 与互操作
+
+Context 采用"不可变写入 + 只读读取"策略根治引用污染：`set` 时递归冻结（`dict→FrozenDict`、`list→tuple`、`set→frozenset`、任意对象→`ReadOnlyProxy`），`get` 返回只读视图，零拷贝。
+
+### 与第三方库集成
+
+`FrozenDict` 继承 `collections.abc.Mapping`，所有检查 `isinstance(x, Mapping)` 的库直接可用：
+
+```python
+data = ctx.get("payload")   # FrozenDict
+
+# 检查 Mapping 的库直接接受
+requests.post(url, json=data)              # ✓ requests 检查 Mapping
+Template("{{name}}").render(data)          # ✓ jinja2 接受 Mapping
+```
+
+### to_mutable 递归解冻
+
+需要把 Context 数据传给**检查 `dict` / `list` 具体类型**（而非 `Mapping`）的库时，用 `to_mutable`：
+
+```python
+from agentkit.core.context import to_mutable
+
+data = ctx.get("payload")        # FrozenDict，内嵌 tuple
+mutable = to_mutable(data)       # dict，且 tuple → list 恢复 JSON array 语义
+
+# jsonschema 用 isinstance(x, dict) / isinstance(x, list) 严格类型检查
+from jsonschema import Draft7Validator
+Draft7Validator({
+    "type": "object",
+    "properties": {"tags": {"type": "array"}}
+}).validate(mutable)             # ✓
+```
+
+与 `copy.deepcopy` 的区别：`deepcopy(FrozenDict)` 返回 dict 但 `tuple` 仍是 tuple，jsonschema 的 `type: "array"` 不认；`to_mutable` 则把 tuple 转为 list。
+
+### 修改 Context 数据
+
+Step 需要修改 Context 数据时，`deepcopy` 后 `set` 回去（会被再次冻结）：
+
+```python
+import copy
+data = copy.deepcopy(ctx.get("data"))   # 解冻为可变 dict
+data["new_key"] = "new_value"
+ctx.set("data", data)                    # 自动再次冻结
+```
+
+## 流式输出
+
+LLMStep 通过 `stream: true` 启用 SSE 流式输出。流式按 OpenAI Chat Completions `stream` 协议接收增量，客户端在流过程中累积 `tool_calls` 分片（按 `index` 拼接 `arguments` JSON），**仅在流末尾**一次性交付完整 `tool_calls`，调用方无需做分片合并。
+
+### 设计原则
+
+- **流式与契约链正交**：流式 = 观测（hook 推送增量），契约链 = 正确性（解析/重试/降级）。两者互不干扰，解析仍按完整文本执行。
+- **Function Call 每轮流式**：因"最终答案轮"只能事后判定，Function Call 循环中每一轮 LLM 调用都流式，前端看到完整生成过程。
+- **`attempt` 标识重试/降级**：解析失败重试、降级模型再试时，hook 携带递增的 `attempt` 参数，前端据此重置缓冲，避免拼接上一次失败的废文本。
+- **`ChatChunk` 不暴露 `delta_reasoning_content`**：DeepSeek 等模型的思考链是模型内部状态，暴露给前端存在 prompt injection 风险；该需求属少数派，未来可通过新增字段与 hook 扩展。
+
+### 启用方式
+
+YAML：
+
+```yaml
+- id: chat
+  type: llm
+  agent: assistant
+  prompt: "{{question}}"
+  output: answer
+  stream: true
+```
+
+Python SDK：
+
+```python
+LLMStep(id="chat", agent=agent, prompt="{{question}}", output="answer", stream=True)
+```
+
+`stream` 默认 `false`，非流式行为完全保留。`stream` 字段类型校验由 `yaml.validator` 强制为 bool。
+
+### 流式 Hook 生命周期
+
+每次流式 LLM 调用触发完整一轮：
+
+```
+on_llm_stream_start(attempt=N)
+  → on_llm_stream_delta(delta=..., accumulated=..., attempt=N)  × N 次
+  → on_llm_stream_end(full_content=..., attempt=N)
+```
+
+`attempt` 取值：`0` = 首次调用，`1+` = 解析失败后的重试或降级模型。前端在 `attempt` 递增时**必须重置缓冲**。
+
+### 消费流式增量
+
+实现自定义 Hook 推送到 SSE / WebSocket / 终端：
+
+```python
+from agentkit.core.hooks import LifecycleHooks
+
+class SSEStreamHooks(LifecycleHooks):
+    def __init__(self, sse_queue):
+        self.sse_queue = sse_queue
+
+    async def on_llm_stream_start(self, step, agent, *, attempt=0):
+        # attempt > 0 时通知前端重置缓冲
+        await self.sse_queue.put({"event": "reset", "attempt": attempt})
+
+    async def on_llm_stream_delta(self, step, agent, delta, accumulated, *, attempt=0):
+        await self.sse_queue.put({"event": "delta", "text": delta})
+
+    async def on_llm_stream_end(self, step, agent, full_content, *, attempt=0):
+        if attempt == 0:
+            await self.sse_queue.put({"event": "done", "text": full_content})
+
+hooks = SSEStreamHooks(my_queue)
+wf = Workflow(name="chat", steps=[...], hooks=hooks)
+```
+
+### 客户端实现
+
+| 客户端 | 流式支持 |
+|--------|----------|
+| `OpenAIClient` | 真流式：解析 SSE 行，按 `index` 累积 `tool_calls`，末尾交付完整列表 |
+| `DeepSeekClient` | 继承 `OpenAIClient`，覆盖 `_build_body` 注入 thinking / reasoning_effort / json_output |
+| `MockClient` | 切片流式：`stream_chunk_size > 0` 时按字节切片模拟增量，否则一次性 yield |
+| 自定义 `LLMClient` 子类 | 不实现 `chat_stream` 时自动退化为单次 `chat` 调用，零成本满足接口契约 |
+
+`ChatChunk` 字段：
+
+| 字段 | 出现时机 | 含义 |
+|------|----------|------|
+| `delta_content` | 中间片段 | 文本增量，调用方累加 |
+| `tool_calls` | 仅末尾 chunk | 完整工具调用列表（客户端已合并分片） |
+| `finish_reason` | 仅末尾 chunk | 流结束原因（`stop` / `tool_calls` / `length`） |
+| `usage` | 通常末尾 chunk | token 用量（需在请求中启用 `stream_options.include_usage`） |
+| `raw` | 任意 | 原始 SSE chunk（调试用） |
+
 ## 可观测性
 
 ### 自动装配 Hooks
@@ -418,6 +585,9 @@ wf = Workflow(name="demo", steps=[...], hooks=hooks)
 - `after_step(step, ctx, trace)` — Step 执行后
 - `on_step_error(step, ctx, error)` — Step 失败时，返回 `ErrorAction`（RAISE / SKIP / DEFAULT / RETRY）
 - `on_llm_call(agent, messages, response, usage)` — LLM 调用后
+- `on_llm_stream_start(step, agent, *, attempt=0)` — 流式调用开始（含 retry/降级，前端据此重置缓冲）
+- `on_llm_stream_delta(step, agent, delta, accumulated, *, attempt=0)` — 流式文本片段
+- `on_llm_stream_end(step, agent, full_content, *, attempt=0)` — 流式调用结束
 - `on_tool_call(tool, params, result)` — 工具调用后
 - `on_mcp_call(server, tool, params, result)` — MCP 工具调用后
 
@@ -842,7 +1012,7 @@ agentkit/
 ├── yaml/
 │   ├── loader.py            # YAML → SDK 对象编译器
 │   └── validator.py         # YAML 静态校验器
-└── parsers/                  # Function Call 解析器
+└── parsers/                  # 输出解析器（text / json / pydantic）
 ```
 
 ## 测试

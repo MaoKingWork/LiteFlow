@@ -13,9 +13,11 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any
 
 from agentkit.llm.base import (
+    ChatChunk,
     LLMClient,
     LLMMessage,
     LLMResponse,
@@ -38,6 +40,10 @@ class MockClient(LLMClient):
                    ``{"content": "...", "tool_calls": [{"id","name","arguments"}]}``，
                    自动转换为 ``LLMResponse``。与 ``responses`` 同时给出时，
                    ``responses`` 优先。
+        stream_chunk_size: 流式切片字符数。默认 0 表示不切片（退化为单 chunk，
+                   继承 ``LLMClient.chat_stream`` 默认行为）。设为正整数时，
+                   ``chat_stream`` 会把 content 按此大小切成多片依次 yield，
+                   用于测试流式累积逻辑。
 
     用法示例::
 
@@ -57,6 +63,12 @@ class MockClient(LLMClient):
 
         # 运行时追加响应
         mc.add_response(LLMResponse(content="more"))
+
+        # 流式测试：按 3 字符切片
+        mc = MockClient(script=[{"content": "hello world"}], stream_chunk_size=3)
+        chunks = [c async for c in mc.chat_stream([LLMMessage(role="user", content="hi")])]
+        # chunks[0].delta_content="hel", chunks[1].delta_content="lo ", ...
+        assert "".join(c.delta_content for c in chunks if c.delta_content) == "hello world"
     """
 
     def __init__(
@@ -64,6 +76,7 @@ class MockClient(LLMClient):
         responses: list[LLMResponse] | None = None,
         call_count: int = 0,
         script: list[dict] | None = None,
+        stream_chunk_size: int = 0,
     ) -> None:
         # script 便利构造：自动转 LLMResponse；responses 显式传入时优先
         if responses is None and script is not None:
@@ -72,6 +85,8 @@ class MockClient(LLMClient):
         self.call_count: int = call_count
         # history 记录每次 chat 的入参，供测试断言
         self.history: list[dict[str, Any]] = []
+        # 流式切片大小：>0 时 chat_stream 按 char 切片，模拟真流式
+        self.stream_chunk_size: int = stream_chunk_size
 
     @staticmethod
     def _script_to_response(item: dict) -> LLMResponse:
@@ -136,6 +151,44 @@ class MockClient(LLMClient):
                 f"len(responses)={len(self.responses)}"
             )
         return self.responses[self.call_count - 1]
+
+    async def chat_stream(
+        self,
+        messages: list[LLMMessage],
+        *,
+        tools: list[dict] | None = None,
+        temperature: float = 0.2,
+        model: str | None = None,
+    ) -> AsyncIterator[ChatChunk]:
+        """流式返回预设响应。
+
+        ``stream_chunk_size > 0`` 时，把 content 按字符切片依次 yield（模拟真流式），
+        末尾 yield 一个携带 ``tool_calls`` / ``finish_reason`` / ``usage`` 的 chunk。
+        ``stream_chunk_size == 0`` 时退化为单 chunk（继承父类默认行为）。
+        """
+        # 复用 chat 取预设响应（含 history 记录与耗尽检查）
+        resp = await self.chat(
+            messages, tools=tools, temperature=temperature, model=model
+        )
+
+        # 切片推送 content（chunk_size==0 时整段作为一个 chunk，等价于非切片）
+        if resp.content:
+            if self.stream_chunk_size > 0:
+                for i in range(0, len(resp.content), self.stream_chunk_size):
+                    yield ChatChunk(
+                        delta_content=resp.content[i : i + self.stream_chunk_size]
+                    )
+            else:
+                yield ChatChunk(delta_content=resp.content)
+
+        # 末尾 chunk：携带 tool_calls / finish_reason / usage
+        # （stream_chunk_size==0 时也走这里，等价于单 chunk 携带完整信息，
+        #   但 content 已在 chat 中返回，这里 delta_content=None）
+        yield ChatChunk(
+            tool_calls=resp.tool_calls or None,
+            finish_reason=resp.finish_reason or None,
+            usage=resp.usage,
+        )
 
 
 __all__ = ["MockClient"]

@@ -150,30 +150,10 @@ class PydanticParser(Parser):
         return ParseResult(success=True, value=model_instance)
 
     def parse_with_retry_hint(self, text: str) -> tuple[ParseResult, str]:
-        """解析并返回 ``(result, retry_hint)``。
-
-        ``retry_hint`` 是给 LLM 的修复提示文本:
-            - 成功时为空字符串;
-            - 失败时形如
-              ``"上一次输出解析失败,错误:\\n<error>\\n请严格按以下结构输出
-              合法 JSON,不要包含额外说明:\\n<schema 摘要>"``。
-
-        LLMStep 用此 hint 拼到下一次请求的 messages 里实现修复重试。
-
-        Args:
-            text: 待解析的原始文本(通常是 LLM 输出)。
-
-        Returns:
-            tuple[ParseResult, str]:
-                - result: 解析结果(同 ``parse``)。
-                - retry_hint: 修复提示文本。成功时为空;失败时非空。
-        """
+        """覆盖：失败时附带 target_model 的 schema 摘要，引导 LLM 按结构输出。"""
         result = self.parse(text)
         if result.ok:
-            # 成功:无需修复提示
             return result, ""
-
-        # 失败:构造修复提示文本
         schema_summary = self._schema_summary()
         hint = (
             f"上一次输出解析失败,错误:\n{result.error}\n"

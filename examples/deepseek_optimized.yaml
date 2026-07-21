@@ -71,3 +71,4 @@ steps:
       推理结果: {{reasoning_result}}
       请整理为结构化 JSON 输出。
     output: final_answer
+    output_format: json

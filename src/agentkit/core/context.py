@@ -24,9 +24,10 @@
 
 公开 API：
     - Context:       不可变上下文容器
-    - FrozenDict:    不可变字典视图
+    - FrozenDict:    不可变字典视图（collections.abc.Mapping 子类）
     - ReadOnlyProxy: 任意对象的只读代理
     - LargeRef:      大对象引用 + 摘要
+    - to_mutable:    递归解冻 Context 数据为可变 JSON 友好结构
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ import copy
 import dataclasses
 import hashlib
 import sys
+from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any
 
@@ -79,14 +81,18 @@ _MISSING: Any = _MissingSentinel()
 
 
 # ---------------------------------------------------------------------------
-# FrozenDict —— 不可变字典视图
+# FrozenDict —— 不可变字典视图（collections.abc.Mapping 子类）
 # ---------------------------------------------------------------------------
-class FrozenDict:
-    """不可变字典视图。
+class FrozenDict(Mapping):
+    """不可变字典视图（``collections.abc.Mapping`` 子类）。
 
     包装一个普通 dict（其 value 已由 ``_deep_freeze`` 递归冻结），对外暴露
-    只读字典接口。所有变更操作（``__setitem__`` / ``__delitem__`` /
-    ``pop`` / ``clear`` / ``update`` / ``setdefault`` 等）抛 ``RuntimeError``。
+    只读 ``Mapping`` 接口。继承 ``Mapping`` 使 ``isinstance(fd, Mapping)``
+    为真，可与 jsonschema / requests.json= / ORM 等检查 ``Mapping`` 的第三方
+    库无缝集成。
+
+    所有变更操作（``__setitem__`` / ``__delitem__`` / ``pop`` / ``clear`` /
+    ``update`` / ``setdefault`` 等）抛 ``RuntimeError``。
 
     ``copy.deepcopy`` 会返回一个**可变** plain dict，以便 Step 修改后通过
     ``Context.set`` 写回（此时会被再次冻结）。
@@ -98,27 +104,19 @@ class FrozenDict:
         # value 已冻结；这里仅做浅拷贝避免持有外部 dict 引用
         object.__setattr__(self, "_data", dict(data))
 
-    # ---- 只读访问 ----
+    # ---- Mapping 抽象方法 ----
     def __getitem__(self, key: Any) -> Any:
         return self._data[key]
-
-    def __contains__(self, key: object) -> bool:
-        return key in self._data
-
-    def __iter__(self) -> Any:
-        return iter(self._data)
 
     def __len__(self) -> int:
         return len(self._data)
 
-    def keys(self) -> Any:
-        return self._data.keys()
+    def __iter__(self) -> Any:
+        return iter(self._data)
 
-    def values(self) -> Any:
-        return self._data.values()
-
-    def items(self) -> Any:
-        return self._data.items()
+    # ---- 性能优化：O(1) 查找，优于 Mapping 默认的 try/except 实现 ----
+    def __contains__(self, key: object) -> bool:
+        return key in self._data
 
     def get(self, key: Any, default: Any = None) -> Any:
         return self._data.get(key, default)
@@ -139,13 +137,14 @@ class FrozenDict:
         return f"FrozenDict({self._data!r})"
 
     def __eq__(self, other: object) -> bool:
+        # 直接比较底层 dict，避免 Mapping 默认 __eq__ 的 dict() 重建开销
         if isinstance(other, FrozenDict):
             return self._data == other._data
-        if isinstance(other, dict):
-            return self._data == other
+        if isinstance(other, Mapping):
+            return self._data == dict(other)
         return NotImplemented
 
-    # 定义 __eq__ 后 Python 会将 __hash__ 置为 None（不可哈希），此处显式声明
+    # 定义 __eq__ 后 Python 会将 __hash__ 置为 None（不可哈希），与 Mapping 一致
     __hash__ = None  # type: ignore[assignment]
 
     def __deepcopy__(self, memo: dict[int, Any]) -> dict[Any, Any]:
@@ -368,11 +367,8 @@ def _to_jsonable(obj: Any) -> Any:
         return obj
     if isinstance(obj, bytes):
         return {"_type": "bytes", "_data": obj.decode("utf-8", errors="replace")}
-    if isinstance(obj, FrozenDict):
-        return {_json_key(k): _to_jsonable(v) for k, v in obj.items()}
-    if isinstance(obj, dict):
-        return {_json_key(k): _to_jsonable(v) for k, v in obj.items()}
-    if isinstance(obj, MappingProxyType):
+    # FrozenDict / dict / MappingProxyType 统一为 Mapping 处理
+    if isinstance(obj, Mapping):
         return {_json_key(k): _to_jsonable(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
         return [_to_jsonable(v) for v in obj]
@@ -383,6 +379,41 @@ def _to_jsonable(obj: Any) -> Any:
         return _to_jsonable(obj._target)
     # 兜底：不可序列化对象记类型与截断 repr
     return {"_type": type(obj).__name__, "_repr": repr(obj)[:200]}
+
+
+def to_mutable(obj: Any) -> Any:
+    """递归解冻 Context 数据为可变 JSON 友好结构。
+
+    把 ``Context.get()`` 返回的只读视图（``FrozenDict`` / ``tuple`` /
+    ``frozenset`` / ``ReadOnlyProxy``）递归转为标准可变 Python 结构，
+    便于传给第三方库（jsonschema / ORM / ``requests.json=`` 等）。
+
+    转换规则：
+        - ``FrozenDict`` / ``dict`` / ``MappingProxyType`` → ``dict``（递归 value）
+        - ``tuple`` / ``list`` → ``list``（递归元素；tuple→list 恢复 JSON array 语义）
+        - ``frozenset`` / ``set`` → ``list``（JSON 无 set 类型）
+        - ``ReadOnlyProxy`` → 解包目标后递归
+        - 其他标量（int/str/bytes/对象）原样返回
+
+    与 ``copy.deepcopy`` 的区别：``deepcopy(FrozenDict)`` 返回 dict 但
+    ``tuple`` 仍是 tuple；``to_mutable`` 则把 tuple 转为 list，更贴合 JSON
+    互操作场景。
+
+    Args:
+        obj: 任意值（通常是 ``Context.get()`` 的返回）。
+
+    Returns:
+        Any: 可变 Python 原生结构。
+    """
+    if isinstance(obj, Mapping):
+        return {to_mutable(k): to_mutable(v) for k, v in obj.items()}
+    if isinstance(obj, ReadOnlyProxy):
+        return to_mutable(obj._target)
+    if isinstance(obj, (list, tuple)):
+        return [to_mutable(v) for v in obj]
+    if isinstance(obj, (set, frozenset)):
+        return [to_mutable(v) for v in obj]
+    return obj
 
 
 def _trace_to_dict(trace: Any) -> Any:
@@ -571,4 +602,4 @@ class Context:
         return ctx
 
 
-__all__ = ["Context", "FrozenDict", "ReadOnlyProxy", "LargeRef"]
+__all__ = ["Context", "FrozenDict", "ReadOnlyProxy", "LargeRef", "to_mutable"]

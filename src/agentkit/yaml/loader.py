@@ -189,6 +189,8 @@ def _compile_step(
             agent=agent,
             prompt=_step_prompt(step_dict),
             output=output,
+            output_format=step_dict.get("output_format", "text"),
+            stream=bool(step_dict.get("stream", False)),
             retry=retry,
             timeout=timeout,
         )

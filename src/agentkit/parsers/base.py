@@ -50,12 +50,12 @@ class ParseResult:
 class Parser(ABC):
     """输出解析器抽象基类。
 
-    所有具体解析器（``TextParser`` / ``PydanticParser`` 等）均继承本类
-    并实现 ``parse`` 方法。
+    所有具体解析器（``TextParser`` / ``JSONParser`` / ``PydanticParser`` 等）
+    均继承本类并实现 ``parse`` 方法。
 
     Attributes:
         target_model: 期望解析得到的 pydantic 模型类。为 None 表示不转结构化对象
-                      （如纯文本解析器）。子类可在类属性或实例属性上覆盖。
+                      （如纯文本 / JSON 解析器）。仅 ``PydanticParser`` 使用。
     """
 
     # 类级默认值；子类可覆盖或在实例上覆盖
@@ -72,6 +72,32 @@ class Parser(ABC):
             ParseResult: 解析结果。成功时 ``ok=True`` 且 ``value`` 为结构化对象；
                         失败时 ``ok=False`` 且 ``error`` 描述原因。
         """
+
+    def parse_with_retry_hint(self, text: str) -> tuple[ParseResult, str]:
+        """解析并返回 ``(result, retry_hint)``。
+
+        ``retry_hint`` 是给 LLM 的修复提示文本：
+            - 成功时为空字符串；
+            - 失败时为通用修复提示，引导 LLM 重新输出合法结果。
+
+        子类可覆盖以提供更具体的提示（如附带 schema 摘要）。
+
+        Args:
+            text: 待解析的原始文本（通常是 LLM 输出）。
+
+        Returns:
+            tuple[ParseResult, str]:
+                - result: 解析结果（同 ``parse``）。
+                - retry_hint: 修复提示文本。成功时为空；失败时非空。
+        """
+        result = self.parse(text)
+        if result.ok:
+            return result, ""
+        hint = (
+            f"上一次输出解析失败,错误:\n{result.error}\n"
+            f"请严格输出合法结果,不要包含额外说明。"
+        )
+        return result, hint
 
 
 __all__ = ["ParseResult", "Parser"]

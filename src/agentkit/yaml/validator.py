@@ -197,6 +197,25 @@ def _validate_steps(
                             f"agent 引用 {agent_ref!r} 未在 agents 段声明",
                         )
                     )
+            # output_format 取值合法性
+            output_format = step_dict.get("output_format", "text")
+            if output_format not in ("text", "json"):
+                report.errors.append(
+                    ValidationError(
+                        path,
+                        f"output_format 必须为 'text' 或 'json',"
+                        f"当前: {output_format!r}",
+                    )
+                )
+            # stream 必须为 bool
+            stream = step_dict.get("stream", False)
+            if not isinstance(stream, bool):
+                report.errors.append(
+                    ValidationError(
+                        path,
+                        f"stream 必须为布尔值(true/false),当前: {stream!r}",
+                    )
+                )
             _check_deprecated_prompt_field(step_dict, path, report)
 
         elif step_type == "tool":

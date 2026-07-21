@@ -34,12 +34,21 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from agentkit.core.agent import AgentConfig, ExhaustedPolicy, instantiate_agent
 from agentkit.core.template import resolve_template, resolve_value
-from agentkit.llm.base import LLMClient, LLMMessage, LLMResponse, ToolCall
+from agentkit.llm.base import (
+    LLMClient,
+    LLMMessage,
+    LLMResponse,
+    LLMUsage,
+    ToolCall,
+)
+from agentkit.parsers.base import Parser
+from agentkit.parsers.json_parser import JSONParser
 from agentkit.parsers.pydantic_parser import PydanticParser
+from agentkit.parsers.text_parser import TextParser
 from agentkit.skill.merger import apply_skills_to_agent
 from agentkit.steps.base import BaseStep, StepTrace, register_step
 from agentkit.tools.base import get_tool
@@ -83,6 +92,15 @@ class LLMStep(BaseStep):
                          ``skills`` 可选,缺省时用 agent 自带 skills。
         prompt:      user 提示词模板,支持 ``{{var}}`` / ``${ENV}``。
         output:      输出键名;解析结果通过 ``ctx.set(output, value)`` 写入。
+        output_format: 输出解析格式,决定无 ``output_model`` 时如何解析 LLM 文本:
+                       - ``"text"``(默认):纯文本,直接 ``strip`` 后存为 str;
+                       - ``"json"``:``json.loads`` 为 dict/list/标量后存入。
+                       ``agent.output_model`` 非 None 时此项被忽略(走 schema 校验)。
+        stream:      是否流式输出。``True`` 时通过 ``on_llm_stream_*`` 钩子
+                     实时推送文本增量(供前端 SSE / 终端打印);``False``(默认)
+                     走非流式 ``chat``。流式不改变契约链语义:解析 / 重试 /
+                     降级模型仍按完整文本执行,retry/降级时 hook 携带递增的
+                     ``attempt`` 参数,前端据此重置缓冲。
         llm_client:  LLM 客户端注入(测试用 MockClient);为 None 时回落到
                      ``agentkit.llm.get_default_client()``。
         retry:       实例级执行重试策略(覆盖 ``execute`` 的 retry_policy)。
@@ -97,6 +115,7 @@ class LLMStep(BaseStep):
             agent="data_compressor",
             prompt="请压缩以下订单:\\n{{order}}",
             output="compressed",
+            output_format="json",
         )
         trace = await step.execute(ctx, hooks, retry_policy=policy)
 
@@ -107,6 +126,14 @@ class LLMStep(BaseStep):
           agent: data_compressor
           prompt: "请压缩: {{order}}"
           output: compressed
+          output_format: json
+        # 流式输出(配合自定义 Hook 消费 delta)
+        - id: chat
+          type: llm
+          agent: assistant
+          prompt: "{{question}}"
+          output: answer
+          stream: true
     """
 
     type = "llm"
@@ -117,6 +144,8 @@ class LLMStep(BaseStep):
         agent: str | AgentConfig | dict | None = None,
         prompt: str = "",
         output: str | None = None,
+        output_format: Literal["text", "json"] = "text",
+        stream: bool = False,
         llm_client: LLMClient | None = None,
         retry: "RetryPolicy | None" = None,
         timeout: float | None = None,
@@ -127,6 +156,8 @@ class LLMStep(BaseStep):
         # agent 引用:运行期在 _resolve_agent 中解析为 AgentConfig
         self.agent_ref: str | AgentConfig | dict | None = agent
         self.prompt: str = prompt
+        self.output_format: Literal["text", "json"] = output_format
+        self.stream: bool = stream
         self.llm_client: LLMClient | None = llm_client
         self.system_override: str | None = system_override
         self.temperature_override: float | None = temperature_override
@@ -370,14 +401,16 @@ class LLMStep(BaseStep):
         max_iter = agent.max_tool_iterations
         offer_tools = tools_schema if (tools_schema and max_iter > 0) else None
 
-        # 无工具:单次调用即可
+        # 无工具:单次调用即可(attempt=0,首轮)
         if offer_tools is None:
-            resp = await self._chat(client, messages, None, agent)
+            resp = await self._llm_call(client, messages, None, agent, attempt=0)
             return resp.content or ""
 
-        # Function Call 循环
+        # Function Call 循环:每轮走 _llm_call(stream 时每轮流式)
         for _ in range(max_iter):
-            resp = await self._chat(client, messages, offer_tools, agent)
+            resp = await self._llm_call(
+                client, messages, offer_tools, agent, attempt=0
+            )
             if not resp.has_tool_calls:
                 # LLM 给出最终文本
                 return resp.content or ""
@@ -412,7 +445,7 @@ class LLMStep(BaseStep):
                 ),
             )
         )
-        resp = await self._chat(client, messages, None, agent)
+        resp = await self._llm_call(client, messages, None, agent, attempt=0)
         return resp.content or ""
 
     async def _execute_tool_call(
@@ -458,6 +491,28 @@ class LLMStep(BaseStep):
     # ------------------------------------------------------------------
     # 输出契约保障链
     # ------------------------------------------------------------------
+    def _make_parser(self, agent: AgentConfig) -> Parser:
+        """根据 ``output_model`` / ``output_format`` 选择解析器。
+
+        优先级:
+            1. ``agent.output_model`` 非 None:用 ``PydanticParser``(严格
+               schema 校验,返回 pydantic 模型实例)。
+            2. ``self.output_format == "json"``:用 ``JSONParser``(JSON
+               语法解析,返回 dict/list/标量)。
+            3. 默认:用 ``TextParser``(纯文本,返回 strip 后的 str)。
+
+        Args:
+            agent: 已解析的 Agent 配置。
+
+        Returns:
+            Parser: 解析器实例。
+        """
+        if agent.output_model is not None:
+            return PydanticParser(agent.output_model)
+        if self.output_format == "json":
+            return JSONParser()
+        return TextParser()
+
     async def _run_output_contract(
         self,
         content: str,
@@ -472,13 +527,14 @@ class LLMStep(BaseStep):
         由 :meth:`run` 按 ``on_exhausted`` 决策。
 
         链路:
-            1. ``PydanticParser`` 解析 + ``output_validator`` 业务校验。
-               (``output_model`` 为 None 时解析恒成功,仅做业务校验。)
+            1. 解析器(由 :meth:`_make_parser` 选择)解析 + ``output_validator``
+               业务校验。``TextParser`` 恒成功;``JSONParser`` / ``PydanticParser``
+               解析失败可重试。
             2. 失败 -> 附加 ``retry_hint`` 重试,共 ``agent.retry.count`` 次。
             3. 重试耗尽 -> 用 ``fallback_model`` 再试一次(若配置)。
             4. 仍失败 -> 返回 (None, error)。
         """
-        parser = PydanticParser(agent.output_model)
+        parser = self._make_parser(agent)
 
         def _try_parse_and_validate(text: str) -> tuple[Any, str | None]:
             result = parser.parse(text)
@@ -495,20 +551,23 @@ class LLMStep(BaseStep):
 
         # 2. 修复重试
         retry_count = agent.retry.count if agent.retry else 0
-        for _ in range(retry_count):
+        for attempt in range(retry_count):
             _, hint = parser.parse_with_retry_hint(content)
             if not hint:
-                # 解析恒成功(如 output_model=None)但业务校验失败:用通用提示
+                # 解析恒成功(如 TextParser)但业务校验失败:用通用提示
                 hint = f"上一次输出未通过校验: {err}。请重新输出合法结果。"
             messages.append(LLMMessage(role="assistant", content=content))
             messages.append(LLMMessage(role="user", content=hint))
-            resp = await self._chat(client, messages, None, agent)
+            # 重试轮:attempt=attempt+1(0 是首次),流式 hook 据此重置缓冲
+            resp = await self._llm_call(
+                client, messages, None, agent, attempt=attempt + 1
+            )
             content = resp.content or ""
             value, err = _try_parse_and_validate(content)
             if err is None:
                 return value, None
 
-        # 3. 降级模型
+        # 3. 降级模型(attempt 续接 retry_count+1,标识降级尝试)
         if agent.fallback_model:
             messages.append(
                 LLMMessage(
@@ -516,8 +575,13 @@ class LLMStep(BaseStep):
                     content="请重新输出最终结果,确保格式合法且通过校验。",
                 )
             )
-            resp = await self._chat(
-                client, messages, None, agent, model=agent.fallback_model
+            resp = await self._llm_call(
+                client,
+                messages,
+                None,
+                agent,
+                model=agent.fallback_model,
+                attempt=retry_count + 1,
             )
             content = resp.content or ""
             value, err = _try_parse_and_validate(content)
@@ -553,8 +617,43 @@ class LLMStep(BaseStep):
         )
 
     # ------------------------------------------------------------------
-    # LLM 调用封装(累计 token)
+    # LLM 调用封装(调度流式 / 非流式 + 累计 token + 触发钩子)
     # ------------------------------------------------------------------
+    async def _llm_call(
+        self,
+        client: LLMClient,
+        messages: list[LLMMessage],
+        tools: list[dict] | None,
+        agent: AgentConfig,
+        *,
+        model: str | None = None,
+        attempt: int = 0,
+    ) -> LLMResponse:
+        """单次 LLM 调用调度器,按 ``self.stream`` 选择流式或非流式。
+
+        两条路径均返回完整 ``LLMResponse``,统一累计 token 用量并触发
+        ``on_llm_call`` 钩子。流式路径额外触发 ``on_llm_stream_*`` 三段钩子。
+
+        Args:
+            client:   LLM 客户端。
+            messages: 对话消息(本方法不修改,由调用方维护追加)。
+            tools:    Function Call 工具 schema;None 表示不启用工具。
+            agent:    Agent 配置(取 temperature / model)。
+            model:    模型名覆盖(降级模型时用);None 时用 ``agent.model``。
+            attempt:  第几次尝试(0=首次,1+=retry/降级)。仅流式路径使用,
+                      传给 ``on_llm_stream_*`` 钩子让前端据此重置缓冲。
+
+        Returns:
+            LLMResponse: LLM 响应(流式路径从累积 chunk 重构)。
+        """
+        if self.stream:
+            return await self._chat_stream_full(
+                client, messages, tools, agent, model=model, attempt=attempt
+            )
+        return await self._chat(
+            client, messages, tools, agent, model=model
+        )
+
     async def _chat(
         self,
         client: LLMClient,
@@ -564,7 +663,7 @@ class LLMStep(BaseStep):
         *,
         model: str | None = None,
     ) -> LLMResponse:
-        """封装一次 LLM 调用,累计 token 用量并触发 ``on_llm_call`` 钩子。
+        """非流式 LLM 调用,累计 token 用量并触发 ``on_llm_call`` 钩子。
 
         Args:
             client:  LLM 客户端。
@@ -589,6 +688,90 @@ class LLMStep(BaseStep):
         hooks = self._hooks
         if hooks is not None:
             await hooks.on_llm_call(agent, messages, resp, resp.usage)
+        return resp
+
+    async def _chat_stream_full(
+        self,
+        client: LLMClient,
+        messages: list[LLMMessage],
+        tools: list[dict] | None,
+        agent: AgentConfig,
+        *,
+        model: str | None = None,
+        attempt: int = 0,
+    ) -> LLMResponse:
+        """流式 LLM 调用,累积 chunk 重构完整 ``LLMResponse``。
+
+        流程:
+            1. 触发 ``on_llm_stream_start``(前端据此重置缓冲)。
+            2. 迭代 ``client.chat_stream``:
+               - ``delta_content`` 累积到 ``accumulated``,触发 ``on_llm_stream_delta``。
+               - 末尾 chunk 携带完整 ``tool_calls`` / ``finish_reason`` / ``usage``。
+            3. 触发 ``on_llm_stream_end``。
+            4. 从累积数据重构 ``LLMResponse``,累计 token,触发 ``on_llm_call``。
+
+        流式不改变契约链语义:解析 / 重试 / 降级仍按完整文本执行。
+        ``attempt`` 标识第几次尝试(retry/降级时递增),让前端区分首次与重试。
+
+        Args:
+            client:   LLM 客户端。
+            messages: 对话消息。
+            tools:    Function Call 工具 schema;None 表示不启用工具。
+            agent:    Agent 配置。
+            model:    模型名覆盖。
+            attempt:  第几次尝试(0=首次,1+=retry/降级)。
+
+        Returns:
+            LLMResponse: 从流式 chunk 累积重构的完整响应。
+        """
+        hooks = self._hooks
+        accumulated = ""
+        tool_calls: list[ToolCall] = []
+        finish_reason = ""
+        usage = None
+
+        if hooks is not None:
+            await hooks.on_llm_stream_start(self, agent, attempt=attempt)
+
+        async for chunk in client.chat_stream(
+            messages=messages,
+            tools=tools if tools else None,
+            temperature=agent.temperature,
+            model=model or agent.model,
+        ):
+            # 文本增量:累积并推送
+            if chunk.delta_content:
+                accumulated += chunk.delta_content
+                if hooks is not None:
+                    await hooks.on_llm_stream_delta(
+                        self, agent, chunk.delta_content, accumulated, attempt=attempt
+                    )
+            # 末尾 chunk:tool_calls / finish_reason / usage
+            if chunk.tool_calls is not None:
+                tool_calls = chunk.tool_calls
+            if chunk.finish_reason:
+                finish_reason = chunk.finish_reason
+            if chunk.usage is not None:
+                usage = chunk.usage
+
+        if hooks is not None:
+            await hooks.on_llm_stream_end(self, agent, accumulated, attempt=attempt)
+
+        # 重构完整 LLMResponse(与非流式 _chat 返回结构一致)
+        if usage is None:
+            # 客户端未返回 usage(如部分 provider 流式不返回 token):用零值兜底
+            usage = LLMUsage()
+        resp = LLMResponse(
+            content=accumulated,
+            tool_calls=tool_calls,
+            usage=usage,
+            finish_reason=finish_reason,
+            raw=None,
+        )
+        # 累计 token 用量 + 触发 on_llm_call(与非流式路径统一)
+        self._token_usage_total += int(usage.total_tokens)
+        if hooks is not None:
+            await hooks.on_llm_call(agent, messages, resp, usage)
         return resp
 
     # ------------------------------------------------------------------
