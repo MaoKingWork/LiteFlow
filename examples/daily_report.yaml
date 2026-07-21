@@ -1,0 +1,40 @@
+# 场景 A:每日数据报告(线性流程)
+# 查询数据库 → LLM 分析 → 发送企业微信通知
+
+name: daily_report
+inputs:
+  - date
+
+agents:
+  - name: analyzer
+    model: gpt-4o-mini
+    system: |
+      你是数据分析助手。根据提供的数据库查询结果,生成简洁的中文日报摘要。
+      摘要应包含:关键指标、环比变化、异常提醒。
+    temperature: 0.2
+    max_tool_iterations: 0
+
+steps:
+  - id: fetch_data
+    type: tool
+    tool: db.query
+    params:
+      sql: "SELECT * FROM orders WHERE date='{{date}}'"
+    output: orders_raw
+
+  - id: analyze
+    type: llm
+    agent: analyzer
+    prompt: |
+      日期: {{date}}
+      订单数据: {{orders_raw}}
+      请生成日报摘要。
+    output: analysis
+
+  - id: notify
+    type: tool
+    tool: sink.wecom
+    params:
+      content: "{{analysis}}"
+      webhook: "${WECOM_WEBHOOK_URL}"
+    output: notify_result

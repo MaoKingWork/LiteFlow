@@ -1,0 +1,27 @@
+{
+  "pack_id": "ops_report",
+  "purpose": "运维健康检查",
+  "version": "1.0.0",
+  "owner": "ops-team",
+  "reports": {
+    "health_check": {
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "service_name": {"type": "string"},
+          "uptime_pct": {"type": "number"},
+          "error_count": {"type": "integer"},
+          "latency_ms": {"type": "number"},
+          "date_str": {"type": "string"}
+        },
+        "required": ["service_name", "uptime_pct", "error_count"]
+      },
+      "rules": [
+        {"name": "status", "type": "formula", "expression": "'健康' if uptime_pct >= 99.5 and error_count < 10 else ('告警' if uptime_pct >= 95 else '故障')"}
+      ],
+      "templates": {
+        "default": {"path": "templates/health_check.md"}
+      }
+    }
+  }
+}

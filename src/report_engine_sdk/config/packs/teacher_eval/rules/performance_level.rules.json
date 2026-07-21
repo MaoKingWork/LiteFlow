@@ -1,0 +1,3 @@
+{
+  "performance_level": {"type": "formula", "expression": "'优秀' if total_score >= 90 else ('良好' if total_score >= 75 else '合格')"}
+}

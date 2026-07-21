@@ -1,0 +1,6 @@
+{
+  "properties": {
+    "report_date": {"type": "string"}
+  },
+  "required": ["report_date"]
+}

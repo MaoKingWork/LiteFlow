@@ -1,0 +1,3 @@
+{
+  "learning_level": {"type": "formula", "expression": "'优秀' if gpa >= 3.8 else ('良好' if gpa >= 3.3 else ('中等' if gpa >= 3.0 else '待提高'))"}
+}

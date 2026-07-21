@@ -1,0 +1,29 @@
+{
+  "pack_id": "teacher_eval",
+  "purpose": "教师绩效评估",
+  "version": "1.0.0",
+  "owner": "hr-team",
+  "shared_rules": "rules/performance_level.rules.json",
+  "reports": {
+    "performance": {
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "teacher_name": {"type": "string"},
+          "base_score": {"type": "number"},
+          "bonus": {"type": "number", "default": 0},
+          "class_size": {"type": "integer"}
+        },
+        "required": ["teacher_name", "base_score"]
+      },
+      "rules": [
+        {"name": "total_score", "type": "formula", "expression": "base_score * 0.8 + bonus"},
+        {"ref": "performance_level"}
+      ],
+      "templates": {
+        "manager": {"path": "templates/manager.md", "prompt": "关注宏观战略与整体绩效"},
+        "teacher": {"path": "templates/teacher.md", "prompt": "关注教学细节与改进建议"}
+      }
+    }
+  }
+}

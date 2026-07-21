@@ -1,0 +1,24 @@
+{
+  "pack_id": "work_report",
+  "purpose": "工作简报",
+  "version": "1.0.0",
+  "owner": "product-team",
+  "reports": {
+    "daily_briefing": {
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "user_name": {"type": "string"},
+          "summary_text": {"type": "string"},
+          "action_items": {"type": "array"},
+          "date_str": {"type": "string"}
+        },
+        "required": ["user_name", "summary_text"]
+      },
+      "rules": [],
+      "templates": {
+        "summary": {"path": "templates/daily_briefing.md"}
+      }
+    }
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "pack_id": "learning_report",
+  "purpose": "学习画像报告",
+  "version": "1.0.0",
+  "owner": "edu-team",
+  "shared_variables": "variables/common.vars.json",
+  "shared_rules": "rules/learning_level.rules.json",
+  "reports": {
+    "learning_profile": {
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "student_name": {"type": "string"},
+          "grade": {"type": "string"},
+          "gpa": {"type": "number"},
+          "class_rank": {"type": "integer"},
+          "class_size": {"type": "integer"},
+          "learning_points": {"type": "integer"},
+          "online_hours": {"type": "number"},
+          "homework_completion_rate": {"type": "number"},
+          "participation_score": {"type": "number"},
+          "strengths": {"type": "array"},
+          "weaknesses": {"type": "array"},
+          "focus_area": {"type": "string"},
+          "maintain_area": {"type": "string"}
+        },
+        "required": ["student_name", "grade", "gpa", "class_rank", "class_size"]
+      },
+      "rules": [
+        {"ref": "learning_level"}
+      ],
+      "templates": {
+        "default": {"path": "templates/learning_profile.md"}
+      }
+    }
+  }
+}

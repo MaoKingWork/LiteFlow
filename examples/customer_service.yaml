@@ -1,0 +1,87 @@
+# 场景 B:智能客服(条件分支 + 循环重试)
+# 分类意图 → 查询类走数据库,投诉类转人工 → 结果校验,不合格重试
+
+name: customer_service
+inputs:
+  - user_message
+
+agents:
+  - name: classifier
+    model: gpt-4o-mini
+    system: |
+      你是意图分类器。将用户消息分类为:query(查询) / complaint(投诉) / other(其他)。
+      仅输出分类标签,不要输出其他内容。
+    temperature: 0.0
+    max_tool_iterations: 0
+
+  - name: responder
+    model: gpt-4o-mini
+    system: |
+      你是客服回复助手。根据查询到的信息生成专业的中文回复。
+      回复需准确、简洁、有同理心。
+    temperature: 0.3
+    max_tool_iterations: 3
+
+  - name: validator
+    model: gpt-4o-mini
+    system: |
+      你是回复质量校验器。判断回复是否:1)准确回答了用户问题 2)语气得当。
+      输出 "pass" 或 "fail"。
+    temperature: 0.0
+    max_tool_iterations: 0
+
+steps:
+  - id: classify
+    type: llm
+    agent: classifier
+    prompt: "{{user_message}}"
+    output: intent
+
+  - id: route
+    type: condition
+    when: "{{intent}} == 'query'"
+    then:
+      - id: fetch_answer
+        type: tool
+        tool: db.query
+        params:
+          sql: "SELECT answer FROM faq WHERE question LIKE '%{{user_message}}%'"
+        output: db_answer
+
+      - id: generate_reply
+        type: llm
+        agent: responder
+        prompt: |
+          用户问题: {{user_message}}
+          数据库结果: {{db_answer}}
+          请生成回复。
+        output: draft_reply
+
+      - id: validate_reply
+        type: llm
+        agent: validator
+        prompt: "用户问题: {{user_message}}\n回复: {{draft_reply}}"
+        output: validation_result
+
+      - id: retry_if_fail
+        type: loop
+        until: "{{validation_result}} == 'pass'"
+        max: 3
+        on_max: continue
+        step:
+          id: regenerate
+          type: llm
+          agent: responder
+          prompt: |
+            用户问题: {{user_message}}
+            数据库结果: {{db_answer}}
+            上次回复(不合格): {{draft_reply}}
+            请重新生成更准确的回复。
+          output: draft_reply
+    else:
+      - id: escalate
+        type: tool
+        tool: sink.wecom
+        params:
+          content: "转人工: {{user_message}}"
+        output: escalate_result

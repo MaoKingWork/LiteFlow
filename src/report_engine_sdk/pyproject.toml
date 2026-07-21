@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "report-engine-sdk"
+version = "0.1.0"
+description = "A protocol-agnostic, config-driven Python SDK for generating Markdown reports from structured data."
+requires-python = ">=3.9"
+dependencies = [
+    "jinja2>=3.0",
+    "simpleeval>=0.9.13",
+    "jsonschema>=4.0",
+]
+
+[project.optional-dependencies]
+mcp = ["fastmcp>=0.1.0"]
+langchain = ["langchain>=0.1.0"]
+api = ["fastapi>=0.100.0", "uvicorn>=0.20.0"]
+s3 = ["boto3>=1.26.0"]
+dev = ["pytest>=7.0", "pytest-cov>=4.0"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["report_engine_sdk*"]
+
+[tool.pytest.ini_options]
+testpaths = ["report_engine_sdk/tests"]
+pythonpath = ["."]
