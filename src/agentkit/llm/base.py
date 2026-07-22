@@ -31,15 +31,29 @@ from typing import Any
 class LLMUsage:
     """LLM 调用的 token 用量统计。
 
+    基础三字段兼容所有 OpenAI 兼容 API;明细字段覆盖 MiMo / DeepSeek 等
+    提供的 ``prompt_tokens_details`` 与 ``completion_tokens_details``,
+    用于多模态计费分析与成本优化。未返回的明细字段默认 0。
+
     Attributes:
-        prompt_tokens:     输入（提示）token 数。
-        completion_tokens: 输出（生成）token 数。
-        total_tokens:      合计 token 数（通常为前两者之和）。
+        prompt_tokens:      输入（提示）token 数。
+        completion_tokens:  输出（生成）token 数。
+        total_tokens:       合计 token 数（通常为前两者之和）。
+        cached_tokens:      命中缓存的输入 token 数（prompt_tokens_details）。
+        reasoning_tokens:   思考链消耗的输出 token 数（completion_tokens_details）。
+        image_tokens:       图片输入消耗的 token 数。
+        audio_tokens:       音频输入消耗的 token 数。
+        video_tokens:       视频输入消耗的 token 数。
     """
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    cached_tokens: int = 0
+    reasoning_tokens: int = 0
+    image_tokens: int = 0
+    audio_tokens: int = 0
+    video_tokens: int = 0
 
 
 @dataclass
@@ -96,29 +110,33 @@ class ChatChunk:
     字段语义：
         - ``delta_content``: 文本增量。实时推送，调用方累加得到完整文本。
           中间片段仅有此字段。
+        - ``delta_reasoning_content``: 思考链增量。与 ``delta_content`` 同构,
+          由 ``OpenAIClient`` 从 ``delta.reasoning_content`` 透传。框架不负责
+          累积;上层消费者(LLMStep 钩子 / 前端)自行拼接。
         - ``tool_calls``: **完整**工具调用列表。客户端在流式过程中按 ``index``
           累积分片（拼接 ``arguments`` JSON 字符串），**仅在流末尾 chunk** 携带。
           调用方无需做分片合并。
         - ``finish_reason`` / ``usage``: 通常仅出现在流末尾 chunk。
 
     设计说明：
-        - 故意不包含 ``delta_reasoning_content``。DeepSeek 等模型的思考链分片
-          不通过流式 hook 推送（思考链是模型内部状态，暴露给前端有 prompt
-          injection 风险；且该需求属少数派）。未来需要时可扩展字段并新增
-          hook 方法，不破坏现有契约。
+        - ``delta_reasoning_content`` 与 ``delta_content`` 处理方式完全对称:
+          框架只透传 API 原始增量,不做缓冲 / 拼接 / Markdown 修复。上层是否
+          消费由钩子决定(``on_llm_stream_delta`` 的 ``delta_reasoning`` 参数)。
         - ``tool_calls`` 选择"客户端累积、末尾一次交付"而非"分片实时推送"，
           因为调用方（LLMStep）只在流结束后判定"是否工具轮"，无需实时观察
           tool_calls 拼接过程。这样简化了所有调用方。
 
     Attributes:
-        delta_content:  文本增量。None 表示本片段无文本。
-        tool_calls:     完整工具调用列表（仅末尾 chunk）。None 表示无工具调用。
-        finish_reason:  流结束原因（仅末尾 chunk）。
-        usage:          token 用量（通常仅末尾 chunk）。
-        raw:            原始 SSE chunk（调试用）。
+        delta_content:           文本增量。None 表示本片段无文本。
+        delta_reasoning_content: 思考链增量。None 表示本片段无思考链。
+        tool_calls:              完整工具调用列表（仅末尾 chunk）。None 表示无工具调用。
+        finish_reason:           流结束原因（仅末尾 chunk）。
+        usage:                   token 用量（通常仅末尾 chunk）。
+        raw:                     原始 SSE chunk（调试用）。
     """
 
     delta_content: str | None = None
+    delta_reasoning_content: str | None = None
     tool_calls: list[ToolCall] | None = None
     finish_reason: str | None = None
     usage: LLMUsage | None = None
@@ -131,24 +149,31 @@ class LLMMessage:
 
     用于构造发送给 LLM 的上下文。四类角色的字段使用约定：
         - system:    仅 ``content``。
-        - user:      仅 ``content``。
-        - assistant: ``content`` 可选；若发起过 Function Call，则 ``tool_calls`` 非空。
-        - tool:      ``content`` 为工具执行结果；``tool_call_id`` 对应被回答的
-                     ToolCall.id；``name`` 为该工具名。
+        - user:      ``content`` 为 ``str`` 或 ``list[dict]``(多模态)。
+                     多模态时每个 dict 是 OpenAI content part,如
+                     ``{"type":"image_url","image_url":{"url":...}}``,
+                     与 OpenAI SDK / LangChain / LiteLLM 原生格式一致。
+        - assistant: ``content`` 可选;若发起过 Function Call,则 ``tool_calls``
+                     非空。``reasoning_content`` 携带思考链(DeepSeek / MiMo),
+                     多轮工具调用时必须回传给 API。
+        - tool:      ``content`` 为工具执行结果;``tool_call_id`` 对应被回答的
+                     ToolCall.id;``name`` 为该工具名。
 
     Attributes:
-        role:         消息角色。system | user | assistant | tool。
-        content:      文本内容（部分角色可能为 None）。
-        tool_calls:   assistant 消息携带的 Function Call 列表。
-        tool_call_id: role=tool 时，回传对应的 ToolCall.id。
-        name:         role=tool 时，对应的工具名。
+        role:              消息角色。system | user | assistant | tool。
+        content:           文本内容或多模态 content part 列表。部分角色可能为 None。
+        tool_calls:        assistant 消息携带的 Function Call 列表。
+        tool_call_id:      role=tool 时,回传对应的 ToolCall.id。
+        name:              role=tool 时,对应的工具名。
+        reasoning_content: assistant 消息的思考链内容。多轮工具调用时需回传。
     """
 
     role: str
-    content: str | None = None
+    content: str | list[dict] | None = None
     tool_calls: list[ToolCall] | None = None
     tool_call_id: str | None = None
     name: str | None = None
+    reasoning_content: str | None = None
 
 
 class LLMClient(ABC):

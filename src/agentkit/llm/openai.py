@@ -32,6 +32,34 @@ from agentkit.llm.base import (
 )
 
 
+def _normalize_content(content: str | list[dict] | None) -> str | list[dict] | None:
+    """校验多模态 content part 列表,仅检查 ``type`` 键存在性后原样透传。
+
+    与 OpenAI SDK / LangChain / LiteLLM 原生格式兼容:用户直接传 dict 列表,
+    无需转换为自定义数据类。``str`` 与 ``None`` 直接返回。
+
+    Args:
+        content: ``str`` / ``list[dict]`` / ``None``。
+
+    Returns:
+        原样透传的 content。
+
+    Raises:
+        TypeError:  content 为 list 但元素非 dict。
+        ValueError: content part dict 缺少 ``type`` 键。
+    """
+    if not isinstance(content, list):
+        return content
+    for i, part in enumerate(content):
+        if not isinstance(part, dict):
+            raise TypeError(
+                f"content[{i}] 必须为 dict,实际为 {type(part).__name__}"
+            )
+        if "type" not in part:
+            raise ValueError(f"content[{i}] 缺少必需的 'type' 键: {part}")
+    return content
+
+
 class OpenAIClient(LLMClient):
     """OpenAI Chat Completions 异步客户端。
 
@@ -92,17 +120,19 @@ class OpenAIClient(LLMClient):
 
         转换规则：
             - system / user: ``{"role", "content"}``
+              ``content`` 为 ``list[dict]`` 时(多模态),逐项校验 ``type`` 键存在后透传,
+              与 OpenAI SDK / LangChain / LiteLLM 原生格式一致。
             - assistant:     ``content`` 可选；若携带 ``tool_calls``，转为 OpenAI
                              tool_calls 格式（``function.arguments`` 序列化为 JSON 字符串）
             - tool:          ``{"role":"tool", "content", "tool_call_id", "name"}``
         """
         if msg.role in ("system", "user"):
-            return {"role": msg.role, "content": msg.content}
+            return {"role": msg.role, "content": _normalize_content(msg.content)}
 
         if msg.role == "assistant":
             d: dict[str, Any] = {"role": "assistant"}
             # content 可能为 None（仅发起 tool_calls 时），OpenAI 接受 null
-            d["content"] = msg.content
+            d["content"] = _normalize_content(msg.content)
             if msg.tool_calls:
                 d["tool_calls"] = [
                     {
@@ -121,7 +151,7 @@ class OpenAIClient(LLMClient):
         if msg.role == "tool":
             d = {
                 "role": "tool",
-                "content": msg.content,
+                "content": _normalize_content(msg.content),
                 "tool_call_id": msg.tool_call_id,
             }
             # name 在 OpenAI 协议中为可选字段，存在时附带
@@ -130,7 +160,7 @@ class OpenAIClient(LLMClient):
             return d
 
         # 兜底：未知 role 按 system/user 风格透传 content
-        return {"role": msg.role, "content": msg.content}
+        return {"role": msg.role, "content": _normalize_content(msg.content)}
 
     # ------------------------------------------------------------------
     # 请求组装(子类可覆盖 _build_body 注入特有参数)
@@ -221,8 +251,9 @@ class OpenAIClient(LLMClient):
 
         解析 SSE 增量：
             - ``delta.content`` 实时 yield（文本片段）
+            - ``delta.reasoning_content`` 实时 yield（思考链增量,与 content 同构透传）
             - ``delta.tool_calls`` 按 ``index`` 累积分片，流末尾一次性 yield 完整列表
-            - 末尾 chunk 携带 ``finish_reason`` 与 ``usage``
+            - 末尾 chunk 携带 ``finish_reason`` 与 ``usage``（含多模态明细）
         """
         await self._ensure_api_key()
         body = self._build_body(messages, tools, temperature, model, stream=True)
@@ -263,8 +294,14 @@ class OpenAIClient(LLMClient):
 
                 # 1. 文本增量：实时 yield
                 delta_content = delta.get("content")
-                if delta_content:
-                    yield ChatChunk(delta_content=delta_content, raw=chunk)
+                # 1b. 思考链增量:与 content 同构,直接透传(不累积)
+                delta_reasoning = delta.get("reasoning_content")
+                if delta_content or delta_reasoning:
+                    yield ChatChunk(
+                        delta_content=delta_content,
+                        delta_reasoning_content=delta_reasoning,
+                        raw=chunk,
+                    )
 
                 # 2. tool_calls 分片：按 index 累积
                 for raw_tc in delta.get("tool_calls") or []:
@@ -288,12 +325,7 @@ class OpenAIClient(LLMClient):
 
                 # 4. usage（末尾 chunk，需 stream_options.include_usage=True）
                 if chunk.get("usage"):
-                    raw_u = chunk["usage"]
-                    usage = LLMUsage(
-                        prompt_tokens=int(raw_u.get("prompt_tokens", 0)),
-                        completion_tokens=int(raw_u.get("completion_tokens", 0)),
-                        total_tokens=int(raw_u.get("total_tokens", 0)),
-                    )
+                    usage = OpenAIClient._parse_usage(chunk["usage"])
 
         # 流末尾：yield 完整 tool_calls + finish_reason + usage。
         # OpenAI SSE 总会在末尾发 finish_reason chunk，故末尾 chunk 总会 yield。
@@ -322,12 +354,39 @@ class OpenAIClient(LLMClient):
         )
 
     @staticmethod
+    def _parse_usage(raw_usage: dict[str, Any]) -> LLMUsage:
+        """解析 OpenAI / MiMo / DeepSeek 响应的 usage 字段。
+
+        基础三字段(prompt/completion/total)所有 OpenAI 兼容 API 均返回;
+        明细字段从 ``prompt_tokens_details`` 与 ``completion_tokens_details``
+        解析,用于多模态计费分析。未返回的明细字段默认 0。
+
+        Args:
+            raw_usage: 响应 dict 中的 ``usage`` 子 dict。
+
+        Returns:
+            LLMUsage: 含全部明细字段的用量统计。
+        """
+        pt_details = raw_usage.get("prompt_tokens_details") or {}
+        ct_details = raw_usage.get("completion_tokens_details") or {}
+        return LLMUsage(
+            prompt_tokens=int(raw_usage.get("prompt_tokens", 0)),
+            completion_tokens=int(raw_usage.get("completion_tokens", 0)),
+            total_tokens=int(raw_usage.get("total_tokens", 0)),
+            cached_tokens=int(pt_details.get("cached_tokens", 0)),
+            reasoning_tokens=int(ct_details.get("reasoning_tokens", 0)),
+            image_tokens=int(pt_details.get("image_tokens", 0)),
+            audio_tokens=int(pt_details.get("audio_tokens", 0)),
+            video_tokens=int(pt_details.get("video_tokens", 0)),
+        )
+
+    @staticmethod
     def _parse_response(data: dict[str, Any]) -> LLMResponse:
         """解析 OpenAI 响应 dict 为 ``LLMResponse``。
 
         - ``choices[0].message.content`` -> content
         - ``choices[0].message.tool_calls`` -> ToolCall 列表（arguments JSON 解析失败用 {}）
-        - ``usage`` -> LLMUsage
+        - ``usage`` -> LLMUsage(含多模态明细字段)
         - ``choices[0].finish_reason`` -> finish_reason
         """
         choices = data.get("choices") or []
@@ -354,13 +413,9 @@ class OpenAIClient(LLMClient):
                 )
             )
 
-        # 解析 usage
+        # 解析 usage(含多模态明细)
         raw_usage = data.get("usage") or {}
-        usage = LLMUsage(
-            prompt_tokens=int(raw_usage.get("prompt_tokens", 0)),
-            completion_tokens=int(raw_usage.get("completion_tokens", 0)),
-            total_tokens=int(raw_usage.get("total_tokens", 0)),
-        )
+        usage = OpenAIClient._parse_usage(raw_usage)
 
         finish_reason = ""
         if choices:

@@ -7,6 +7,7 @@
 - **双层架构**：YAML 声明式配置 + Python SDK，按需选择抽象层级
 - **6 种 Step 类型**：tool / llm / condition / loop / parallel / skill，覆盖常见编排场景
 - **声明式输出解析**：LLMStep 支持 `output_format: text | json`，配合 `output_model` 实现"文本/JSON/Schema 校验"三级解析，复用解析失败→修复重试→降级模型完整保障链
+- **端口系统**：Step 声明式输入/输出端口（变量名 + 类型契约），支持 Python 风格自动类型推断与显式类型校验（`strict` 默认拒绝隐式转换）、多输出自动拆分、作用域封闭（`strict_scope`）、静态连线校验。不声明端口时行为不变
 - **流式输出**：LLMStep `stream: true` 启用 SSE 流式，通过 `on_llm_stream_*` 钩子实时推送文本增量；retry/降级模型通过 `attempt` 参数标识，前端据此重置缓冲。流式与契约链正交，解析/重试/降级语义不变
 - **不可变 Context 与生态互操作**：`FrozenDict` 继承 `collections.abc.Mapping`，与 jsonschema / requests / ORM 等检查 Mapping 的库零摩擦集成；`to_mutable()` 提供递归解冻入口
 - **模板引擎**：`{{var}}` 变量替换、`${ENV}` 环境变量、`{{#if}}`/`{{#each}}` 条件与循环
@@ -366,6 +367,137 @@ ${WECOM_WEBHOOK}    # 运行时从 os.environ 取值
 ### 安全性
 
 模板引擎使用 AST 解析进行表达式求值，不调用 `eval()`，避免代码注入风险。
+
+## 端口系统
+
+端口系统是叠加在现有 `{{var}}` + Context 数据流之上的**声明式契约层**：为 Step 增加显式输入/输出端口（变量名 + 类型），既支持 Python 风格自动类型推断（零配置），又支持显式类型契约（高级、稳定）。不声明端口时行为完全同现状（低下限）；声明端口即启用契约（高上限）。
+
+### 简写阶梯
+
+从零配置到完整声明，平滑过渡：
+
+```yaml
+# 阶梯 0：不声明端口（现状，零下限）
+- id: a
+  type: llm
+  prompt: "{{x}}"
+  output: y
+
+# 阶梯 1：output 单字段（语法糖 = 单输出端口）
+- id: a
+  type: llm
+  output: y
+
+# 阶梯 2：dict 简写带类型
+- id: a
+  type: llm
+  outputs: {y: str}
+
+# 阶梯 3：列表简写
+- id: a
+  type: llm
+  outputs: [y, z]
+
+# 阶梯 4：完整端口声明
+- id: a
+  type: llm
+  outputs:
+    - name: y
+      type: str
+      required: true
+      strict: true
+      description: 分析结论
+```
+
+`inputs` 支持 dict 简写 `{name: type}` 与列表简写 `[name]`，规则同 `outputs`。
+
+### 输入端口与连线
+
+输入端口的 `from` 指定数据来源（上游输出端口名或工作流输入），`name` 是本 Step 内的变量名。`from` 默认等于 `name`——最常见情形零配置：
+
+```yaml
+steps:
+  - id: fetch
+    type: tool
+    tool: db.query
+    outputs:
+      - name: orders
+        type: list[dict]
+
+  - id: analyze
+    type: llm
+    agent: analyzer
+    inputs:
+      - name: orders        # 本 Step 内变量名（默认 from=orders）
+        type: list[dict]
+      - name: threshold      # 重命名：本 Step 内叫 threshold
+        from: cfg_threshold  # 从 Context 的 cfg_threshold 取
+        type: int
+        required: false
+        default: 10
+    outputs:
+      - name: summary
+        type: str
+    prompt: |
+      订单: {{orders}}
+      阈值: {{threshold}}
+```
+
+### 类型表达
+
+| 表达 | 形式 | 适用 |
+|------|------|------|
+| 不声明 | `type:` 省略 | 自动推断，不校验 |
+| 类型字符串 | `type: list[str]` | Python 风格显式类型 |
+| JSON Schema | `schema: {type: object, ...}` | 完整结构契约 |
+
+类型字符串支持：`str | int | float | bool | list | dict | any`、`list[str]`、`dict[str, int]`、`str | None`。用 AST 白名单解析器（不调 `eval`）。
+
+### 严格类型模式
+
+`strict: true`（**默认**）拒绝隐式类型转换：`"5"` 声明 `int` → 报错而非静默转为 `5`。在契约系统中，静默修正数据比报错更危险。需容错时显式 `strict: false`。
+
+### 作用域封闭
+
+`strict_scope: true`（Step 级，默认 `false`）：封闭输入作用域，模板中引用未在 `inputs` 声明的变量直接抛 `UndefinedError`，切断对全局 Context 的回退。默认 `false` 保持易用（工作流级输入、`{{#each}}` 的 `this`/`index` 无需声明）；静态校验始终扫描未声明引用并报 warning。
+
+### 多输出拆分
+
+声明多个输出端口时，Tool 的 dict 返回 / LLM 的 JSON 输出按端口名自动拆分：
+
+```yaml
+- id: analyze
+  type: llm
+  agent: analyzer
+  output_format: json
+  outputs:
+    - name: summary
+      type: str
+    - name: keywords
+      type: list[str]
+  prompt: "返回 JSON: {summary, keywords}"
+# LLM 返回 {"summary": "...", "keywords": [...]} → 自动拆分到两端口
+```
+
+单输出端口保留完整聚合对象，下游可用 `{{result.field}}` 点号路径访问字段。
+
+### 静态校验
+
+`validate_workflow` 在编译前检查：端口名唯一、`type`/`schema` 互斥、`output`/`outputs` 互斥、`from` 来源存在（不确定时 warning）、模板变量引用扫描（幽灵依赖 warning，`strict_scope` 时 error）、并行端口冲突提示。
+
+### 字段参考
+
+| 字段 | 适用 | 默认 | 说明 |
+|------|------|------|------|
+| `name` | 输入/输出 | — | 端口名 = 变量名 = Context key |
+| `from` | 输入 | =name | 来源 Context key |
+| `type` | 输入/输出 | — | 类型字符串，与 `schema` 互斥 |
+| `schema` | 输入/输出 | — | JSON Schema，与 `type` 互斥 |
+| `required` | 输入/输出 | `true` | 输入缺来源/输出未产出时报错 |
+| `strict` | 输入/输出 | `true` | 拒绝隐式类型转换 |
+| `default` | 输入 | — | `required: false` 时的默认值 |
+| `description` | 输入/输出 | — | 文档说明 |
+| `strict_scope` | Step 级 | `false` | 封闭输入作用域 |
 
 ## Context 与互操作
 
@@ -983,6 +1115,7 @@ agentkit/
 │   ├── context.py           # Context 共享状态
 │   ├── checkpoint.py        # 检查点存储
 │   ├── hooks.py             # 生命周期钩子
+│   ├── ports.py             # 端口系统（类型契约、输入绑定、输出校验）
 │   ├── template.py          # 模板引擎
 │   ├── trace_summary.py     # 执行轨迹汇总可视化
 │   └── workflow.py          # Workflow 编排器

@@ -37,6 +37,7 @@ import json
 from typing import TYPE_CHECKING, Any, Literal
 
 from agentkit.core.agent import AgentConfig, ExhaustedPolicy, instantiate_agent
+from agentkit.core.ports import PortBindingError
 from agentkit.core.template import resolve_template, resolve_value
 from agentkit.llm.base import (
     LLMClient,
@@ -74,6 +75,33 @@ class OutputContractError(Exception):
 
 
 # ---------------------------------------------------------------------------
+# _resolve_content_part —— 递归解析 content part 中的模板变量
+# ---------------------------------------------------------------------------
+def _resolve_content_part(part: dict, resolver) -> dict:
+    """递归解析 content part dict 中的 ``{{var}}`` / ``${ENV}`` 模板变量。
+
+    遍历 dict 的所有字符串值(含嵌套 dict),用 ``resolver`` 解析。
+    非字符串值原样保留。``resolver`` 通常为 ``step._render``，叠加端口作用域。
+
+    Args:
+        part:     OpenAI content part dict(如 ``{"type": "image_url", ...}``)。
+        resolver: 模板解析回调，签名 ``(str) -> Any``。
+
+    Returns:
+        dict: 解析后的新 dict(不修改原 dict)。
+    """
+    resolved: dict[str, Any] = {}
+    for key, value in part.items():
+        if isinstance(value, str):
+            resolved[key] = resolver(value)
+        elif isinstance(value, dict):
+            resolved[key] = _resolve_content_part(value, resolver)
+        else:
+            resolved[key] = value
+    return resolved
+
+
+# ---------------------------------------------------------------------------
 # LLMStep
 # ---------------------------------------------------------------------------
 @register_step("llm")
@@ -91,6 +119,10 @@ class LLMStep(BaseStep):
                        - ``dict``:形如 ``{"name": "...", "skills": [...]}``,
                          ``skills`` 可选,缺省时用 agent 自带 skills。
         prompt:      user 提示词模板,支持 ``{{var}}`` / ``${ENV}``。
+                     纯文本场景为 ``str``;多模态场景为 ``list[dict]``,
+                     每个 dict 是 OpenAI content part(如
+                     ``{"type": "image_url", "image_url": {"url": ...}}``),
+                     按 list 顺序组装为 user 消息的 content。
         output:      输出键名;解析结果通过 ``ctx.set(output, value)`` 写入。
         output_format: 输出解析格式,决定无 ``output_model`` 时如何解析 LLM 文本:
                        - ``"text"``(默认):纯文本,直接 ``strip`` 后存为 str;
@@ -142,7 +174,7 @@ class LLMStep(BaseStep):
         self,
         id: str = "",
         agent: str | AgentConfig | dict | None = None,
-        prompt: str = "",
+        prompt: str | list[dict] = "",
         output: str | None = None,
         output_format: Literal["text", "json"] = "text",
         stream: bool = False,
@@ -151,11 +183,18 @@ class LLMStep(BaseStep):
         timeout: float | None = None,
         system_override: str | None = None,
         temperature_override: float | None = None,
+        *,
+        inputs: list | None = None,
+        outputs: list | None = None,
+        strict_scope: bool = False,
     ) -> None:
-        super().__init__(id=id, output=output, retry=retry, timeout=timeout)
+        super().__init__(
+            id=id, output=output, retry=retry, timeout=timeout,
+            inputs=inputs, outputs=outputs, strict_scope=strict_scope,
+        )
         # agent 引用:运行期在 _resolve_agent 中解析为 AgentConfig
         self.agent_ref: str | AgentConfig | dict | None = agent
-        self.prompt: str = prompt
+        self.prompt: str | list[dict] = prompt
         self.output_format: Literal["text", "json"] = output_format
         self.stream: bool = stream
         self.llm_client: LLMClient | None = llm_client
@@ -216,8 +255,15 @@ class LLMStep(BaseStep):
         if error is not None:
             value = self._apply_on_exhausted(agent, error)
 
-        # 9. 写入 output
-        if self.output:
+        # 9. 写入输出端口：多输出拆分，单输出整体写入
+        if len(self.outputs) > 1:
+            if not isinstance(value, dict):
+                raise PortBindingError(
+                    f"LLMStep {self.id!r} 声明了 {len(self.outputs)} 个输出端口，"
+                    f"但解析结果非 dict(实际 {type(value).__name__})，无法拆分"
+                )
+            self._emit_dict_outputs(ctx, value)
+        elif self.output:
             ctx.set(self.output, value)
         return ctx
 
@@ -291,29 +337,43 @@ class LLMStep(BaseStep):
 
         - system:``self.system_override`` 优先,否则 ``agent.system``;非空时
           经 ``resolve_template`` 解析 ``{{var}}`` / ``${ENV}``。
-        - user:``self.prompt`` 经 ``resolve_value`` 解析(单 ``{{var}}`` 返回
-          原对象,这里统一 ``str()`` 化)。
+        - user:``self.prompt`` 为 ``str`` 时经 ``resolve_value`` 解析后 ``str()`` 化;
+          为 ``list[dict]`` 时(多模态),逐个 content part 递归解析
+          ``{{var}}`` / ``${ENV}``,保持 list 顺序原样作为 user 消息 content。
 
         同时记录 input_summary 供 trace。
         """
         messages: list[LLMMessage] = []
 
-        # system 消息
+        # system 消息（始终返回 str，用 _render_str 叠加端口作用域）
         system_tpl = (
             self.system_override if self.system_override is not None else agent.system
         )
         if system_tpl:
-            system_text = resolve_template(system_tpl, ctx)
+            system_text = self._render_str(system_tpl, ctx)
             if system_text:
                 messages.append(LLMMessage(role="system", content=system_text))
 
-        # user 消息
-        user_raw = resolve_value(self.prompt, ctx)
-        user_content = user_raw if isinstance(user_raw, str) else str(user_raw)
-        messages.append(LLMMessage(role="user", content=user_content))
-
-        # 记录输入摘要(供 _enrich_trace)
-        self._last_input_summary = self._summarize(user_content)
+        # user 消息:str 或 list[dict](多模态)
+        if isinstance(self.prompt, list):
+            # 多模态:逐个 content part 解析模板变量（叠加端口作用域）
+            user_content: str | list[dict] = [
+                _resolve_content_part(part, lambda t: self._render(t, ctx))
+                for part in self.prompt
+            ]
+            messages.append(LLMMessage(role="user", content=user_content))
+            # input_summary:拼接所有 text part 供 trace
+            text_parts = [
+                p.get("text", "")
+                for p in user_content
+                if isinstance(p, dict) and p.get("type") == "text"
+            ]
+            self._last_input_summary = self._summarize(" ".join(text_parts))
+        else:
+            user_raw = self._render(self.prompt, ctx)
+            user_content_str = user_raw if isinstance(user_raw, str) else str(user_raw)
+            messages.append(LLMMessage(role="user", content=user_content_str))
+            self._last_input_summary = self._summarize(user_content_str)
 
         return messages
 
@@ -416,11 +476,16 @@ class LLMStep(BaseStep):
                 return resp.content or ""
 
             # 有 tool_calls:执行并把结果追加到对话历史
+            # 提取 reasoning_content(DeepSeek/MiMo 多轮工具调用需回传)
+            reasoning = None
+            if isinstance(resp.raw, dict):
+                reasoning = resp.raw.get("reasoning_content")
             messages.append(
                 LLMMessage(
                     role="assistant",
                     content=resp.content,
                     tool_calls=list(resp.tool_calls),
+                    reasoning_content=reasoning,
                 )
             )
             for tc in resp.tool_calls:
@@ -726,6 +791,7 @@ class LLMStep(BaseStep):
         """
         hooks = self._hooks
         accumulated = ""
+        accumulated_reasoning = ""
         tool_calls: list[ToolCall] = []
         finish_reason = ""
         usage = None
@@ -744,7 +810,18 @@ class LLMStep(BaseStep):
                 accumulated += chunk.delta_content
                 if hooks is not None:
                     await hooks.on_llm_stream_delta(
-                        self, agent, chunk.delta_content, accumulated, attempt=attempt
+                        self, agent, chunk.delta_content, accumulated,
+                        attempt=attempt,
+                        delta_reasoning=None,
+                    )
+            # 思考链增量:累积并推送(与 content 对称,框架不负责最终拼接)
+            if chunk.delta_reasoning_content:
+                accumulated_reasoning += chunk.delta_reasoning_content
+                if hooks is not None:
+                    await hooks.on_llm_stream_delta(
+                        self, agent, "", accumulated,
+                        attempt=attempt,
+                        delta_reasoning=chunk.delta_reasoning_content,
                     )
             # 末尾 chunk:tool_calls / finish_reason / usage
             if chunk.tool_calls is not None:
@@ -761,12 +838,13 @@ class LLMStep(BaseStep):
         if usage is None:
             # 客户端未返回 usage(如部分 provider 流式不返回 token):用零值兜底
             usage = LLMUsage()
+        raw = {"reasoning_content": accumulated_reasoning} if accumulated_reasoning else None
         resp = LLMResponse(
             content=accumulated,
             tool_calls=tool_calls,
             usage=usage,
             finish_reason=finish_reason,
-            raw=None,
+            raw=raw,
         )
         # 累计 token 用量 + 触发 on_llm_call(与非流式路径统一)
         self._token_usage_total += int(usage.total_tokens)

@@ -71,8 +71,15 @@ class ToolStep(BaseStep):
         role: str | None = None,
         retry: "RetryPolicy | None" = None,
         timeout: float | None = None,
+        *,
+        inputs: list | None = None,
+        outputs: list | None = None,
+        strict_scope: bool = False,
     ) -> None:
-        super().__init__(id=id, output=output, retry=retry, timeout=timeout)
+        super().__init__(
+            id=id, output=output, retry=retry, timeout=timeout,
+            inputs=inputs, outputs=outputs, strict_scope=strict_scope,
+        )
         self.tool: str = tool
         self.params: dict = params or {}
         self.role_override: str | None = role
@@ -88,8 +95,8 @@ class ToolStep(BaseStep):
         """
         self._tool_calls_record = []
 
-        # 解析参数模板({{var}} / ${ENV})
-        resolved_params = resolve_value(self.params, ctx)
+        # 解析参数模板({{var}} / ${ENV})，叠加端口作用域
+        resolved_params = self._render(self.params, ctx)
         if not isinstance(resolved_params, dict):
             resolved_params = {"value": resolved_params}
 
@@ -116,8 +123,10 @@ class ToolStep(BaseStep):
                 tool_instance, resolved_params, result
             )
 
-        # 写入 output
-        if self.output:
+        # 写入输出端口：多输出拆分，单输出整体写入
+        if len(self.outputs) > 1:
+            self._emit_dict_outputs(ctx, result)
+        elif self.output:
             ctx.set(self.output, result)
         return ctx
 

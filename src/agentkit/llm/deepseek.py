@@ -1,23 +1,19 @@
-"""llm.deepseek —— DeepSeek 深度适配客户端。
+"""llm.deepseek —— DeepSeek 深度适配客户端(薄壳)。
 
-本模块实现 ``DeepSeekClient``,继承 ``OpenAIClient`` 并叠加 DeepSeek 特有优化:
+本模块实现 ``DeepSeekClient``,继承 ``OpenAIClient``,通过**组合调用**
+``thinking.py`` 纯函数叠加 DeepSeek 特有优化,而非在继承链中间插入基类。
 
-1. **思考模式(thinking)**:通过 ``extra_body={"thinking": {"type": "enabled"}}``
-   开启思维链推理,大幅提升复杂推理任务质量。
-2. **思考强度(reasoning_effort)**:``"high"`` / ``"max"`` 控制推理深度。
-3. **JSON Output**:设置 ``response_format={'type': 'json_object'}`` 确保输出
-   合法 JSON,配合 ``output_model`` 契约链实现结构化输出零失败。
-4. **reasoning_content 处理**:解析思维链内容并保存到 ``LLMResponse.raw``,
-   在多轮工具调用中自动拼接到上下文(DeepSeek 要求工具调用轮次的
-   reasoning_content 必须回传)。
-5. **思考模式参数抑制**:思考模式下 temperature / top_p 等不生效,自动移除
-   避免无意义传输。
+DeepSeek 特有逻辑(与 MiMo 共有的部分由 ``thinking.py`` 承载):
+    1. ``reasoning_effort``:思考强度(``"high"`` / ``"max"``),DeepSeek 专属。
+    2. 其余(thinking 注入 / temperature 抑制 / JSON Output /
+       reasoning_content 回传 / 响应提取)均由 ``thinking.py`` 函数处理。
 
 设计原则:
-    - 继承复用:不重写 HTTP 层,仅在请求体组装与响应解析处覆盖。
-    - 配置驱动:所有优化通过 ``DeepSeekOptions`` 控制,可按需开关。
-    - 向下兼容:关闭 thinking 后行为与 ``OpenAIClient`` 完全一致。
-    - 类型注解完整,中文 docstring。
+    - **组合优于继承**:不引入中间基类,直接继承 ``OpenAIClient`` + 调用纯函数。
+    - **薄壳**:``_build_body`` / ``_message_to_dict`` / ``_parse_response``
+      仅调用父类 + thinking 函数,无重复逻辑。
+    - 未来新增"OpenAI 兼容 + 思考"模型(如 MiMo)同理继承 ``OpenAIClient``
+      并组合调用 ``thinking.py``,无需触碰本类。
 
 公开 API:
     - DeepSeekClient: DeepSeek 深度适配客户端
@@ -25,21 +21,29 @@
 
 from __future__ import annotations
 
-import json
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from agentkit.llm.base import LLMMessage, LLMResponse, LLMUsage, ToolCall
+from agentkit.llm.base import LLMMessage, LLMResponse
 from agentkit.llm.openai import OpenAIClient
 from agentkit.llm.provider import DeepSeekOptions
+from agentkit.llm.thinking import (
+    apply_thinking,
+    attach_reasoning,
+    with_reasoning_content,
+)
 
 __all__ = ["DeepSeekClient"]
 
 
 class DeepSeekClient(OpenAIClient):
-    """DeepSeek 深度适配客户端。
+    """DeepSeek 深度适配客户端(薄壳)。
 
-    继承 ``OpenAIClient``,在请求体组装时注入 DeepSeek 特有参数(thinking /
-    reasoning_effort / response_format),在响应解析时提取 reasoning_content。
+    继承 ``OpenAIClient``,在请求体组装时调用 ``apply_thinking`` 注入思考参数,
+    在消息转换时调用 ``with_reasoning_content`` 回传思考链,
+    在响应解析时调用 ``attach_reasoning`` 提取思考链。
+
+    DeepSeek 专属参数(``reasoning_effort``)由 ``DeepSeekOptions`` 承载,
+    在 ``_build_body`` 中注入。
 
     Args:
         api_key:  DeepSeek API Key。为 None 时读 ``DEEPSEEK_API_KEY`` 环境变量。
@@ -48,25 +52,6 @@ class DeepSeekClient(OpenAIClient):
         client:   可选的已构造 ``httpx.AsyncClient``。
         model:    默认模型名,默认 ``deepseek-v4-pro``。
         options:  DeepSeek 深度优化选项;``None`` 时用默认(思考模式开启)。
-
-    用法示例::
-
-        from agentkit.llm.provider import create_client
-
-        # 用预设创建
-        client = create_client("deepseek")
-        resp = await client.chat([LLMMessage(role="user", content="你好")])
-
-    YAML 配置示例::
-
-        providers:
-          - name: deepseek
-            # 用内置预设,只需配 api_key
-            api_key: ${DEEPSEEK_API_KEY}
-            options:
-              thinking: enabled
-              reasoning_effort: high
-              json_output: true
     """
 
     def __init__(
@@ -88,7 +73,7 @@ class DeepSeekClient(OpenAIClient):
         self.options: DeepSeekOptions = options or DeepSeekOptions()
 
     # ------------------------------------------------------------------
-    # 请求体组装(覆盖父类,注入 DeepSeek 特有参数)
+    # 请求体组装(薄壳:父类 + apply_thinking + reasoning_effort)
     # ------------------------------------------------------------------
     def _build_body(
         self,
@@ -99,49 +84,26 @@ class DeepSeekClient(OpenAIClient):
         *,
         stream: bool = False,
     ) -> dict[str, Any]:
-        """覆盖：注入 thinking / reasoning_effort / JSON Output 参数。
+        """覆盖:父类组装基础 body → ``apply_thinking`` 注入思考参数 → 追加 reasoning_effort。"""
+        body = super()._build_body(messages, tools, temperature, model, stream=stream)
 
-        ``chat`` 与 ``chat_stream`` 均通过此方法组装请求体，自动继承 DeepSeek
-        特有优化。thinking=enabled 时移除 temperature（思考模式不生效）。
-        """
-        body: dict[str, Any] = {
-            "model": model or self.model or "deepseek-v4-pro",
-            "messages": [self._message_to_dict(m) for m in messages],
-        }
+        # 组合调用:注入 thinking / JSON Output / max_completion_tokens,抑制 temperature
+        apply_thinking(body, self.options)
 
-        # thinking 模式参数注入
+        # DeepSeek 专属:reasoning_effort(仅在思考模式开启时注入)
         thinking_enabled = (
             self.options.thinking is not None
             and self.options.thinking != "disabled"
         )
+        if self.options.reasoning_effort and thinking_enabled:
+            body.setdefault("extra_body", {})["reasoning_effort"] = (
+                self.options.reasoning_effort
+            )
 
-        # 思考模式不生效的参数:仅在非思考模式时传 temperature
-        if not thinking_enabled:
-            body["temperature"] = temperature
-
-        if tools:
-            body["tools"] = tools
-
-        # JSON Output:注入 response_format
-        if self.options.json_output:
-            body["response_format"] = {"type": "json_object"}
-
-        # extra_body:thinking + reasoning_effort
-        extra_body: dict[str, Any] = {}
-        if self.options.thinking is not None:
-            extra_body["thinking"] = {"type": self.options.thinking}
-        if self.options.reasoning_effort is not None and thinking_enabled:
-            extra_body["reasoning_effort"] = self.options.reasoning_effort
-        if extra_body:
-            body["extra_body"] = extra_body
-
-        if stream:
-            body["stream"] = True
-            body["stream_options"] = {"include_usage": True}
         return body
 
     async def _ensure_api_key(self) -> None:
-        """覆盖：DeepSeek 专用错误信息。"""
+        """覆盖:DeepSeek 专用错误信息。"""
         if not self.api_key:
             raise RuntimeError(
                 "DeepSeekClient 缺少 api_key:未显式传入且环境变量 "
@@ -149,48 +111,21 @@ class DeepSeekClient(OpenAIClient):
             )
 
     # ------------------------------------------------------------------
-    # 消息格式转换(覆盖父类,处理 reasoning_content 多轮拼接)
+    # 消息格式转换(薄壳:父类 + with_reasoning_content)
     # ------------------------------------------------------------------
     @staticmethod
     def _message_to_dict(msg: LLMMessage) -> dict[str, Any]:
-        """把 ``LLMMessage`` 转为 DeepSeek 消息 dict。
-
-        与 ``OpenAIClient._message_to_dict`` 的区别:
-            - assistant 消息携带 ``reasoning_content`` 时回传给 API
-              (DeepSeek 要求工具调用轮次的 reasoning_content 必须回传)。
-        """
+        """覆盖:父类转换 → ``with_reasoning_content`` 追加思考链回传。"""
         d = OpenAIClient._message_to_dict(msg)
-
-        # assistant 消息:回传 reasoning_content(存在时)
-        if msg.role == "assistant" and hasattr(msg, "reasoning_content"):
-            rc = getattr(msg, "reasoning_content", None)
-            if rc:
-                d["reasoning_content"] = rc
-
+        with_reasoning_content(d, msg)
         return d
 
     # ------------------------------------------------------------------
-    # 响应解析(覆盖父类,提取 reasoning_content)
+    # 响应解析(薄壳:父类 + attach_reasoning)
     # ------------------------------------------------------------------
     @staticmethod
     def _parse_response(data: dict[str, Any]) -> LLMResponse:
-        """解析 DeepSeek 响应 dict 为 ``LLMResponse``。
-
-        与 ``OpenAIClient._parse_response`` 的区别:
-            - 提取 ``reasoning_content`` 保存到 ``raw`` 中。
-            - 其余字段(content / tool_calls / usage / finish_reason)复用父类逻辑。
-        """
-        # 先用父类解析标准字段
+        """覆盖:父类解析标准字段 → ``attach_reasoning`` 提取 reasoning_content。"""
         resp = OpenAIClient._parse_response(data)
-
-        # 提取 reasoning_content(DeepSeek 特有,与 content 同级)
-        choices = data.get("choices") or []
-        message: dict[str, Any] = choices[0]["message"] if choices else {}
-        reasoning_content = message.get("reasoning_content")
-
-        # 把 reasoning_content 存到 raw 中,供多轮拼接使用
-        raw = resp.raw if isinstance(resp.raw, dict) else {}
-        raw["reasoning_content"] = reasoning_content
-        resp.raw = raw
-
+        attach_reasoning(resp, data)
         return resp
