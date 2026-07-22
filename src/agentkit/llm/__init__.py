@@ -2,9 +2,12 @@
 
 提供统一的 LLM 调用抽象与多提供商支持:
     - base:      LLMClient 抽象基类,定义 chat 接口与核心数据类
-    - provider:  多提供商配置层(LLMProvider / DeepSeek 预设 / 注册表)
-    - openai:    OpenAI 兼容客户端实现(基于 httpx,通用兼容)
-    - deepseek:  DeepSeek 深度适配(thinking 模式 / JSON Output / reasoning_effort)
+    - thinking:  思考模式纯函数工具(apply_thinking / reasoning_content 处理)
+    - provider:  多提供商配置层(LLMProvider / DeepSeek+MiMo 预设 / 注册表)
+    - openai:    OpenAI 兼容客户端实现(基于 httpx,多模态 dict 透传)
+    - deepseek:  DeepSeek 深度适配(薄壳:组合 thinking.py + reasoning_effort)
+    - mimo:      MiMo 深度适配(薄壳:组合 thinking.py + 多模态)
+    - media:     多模态 content part 构造助手(可选,返回原生 dict)
     - mock:      测试用 Mock 客户端,不消耗 token 不发网络请求
 
 本模块提供两层客户端机制:
@@ -17,9 +20,9 @@
 
 设计原则:
 - 高度模块化:仅聚合本子包各模块,无外部循环依赖。
+- 组合优于继承:思考逻辑由 thinking.py 纯函数承载,客户端薄壳组合调用。
+- 多模态原生兼容:content 支持 str | list[dict],与 OpenAI 生态零摩擦。
 - 可注入:默认客户端与提供商均可随时替换,便于测试隔离。
-- DeepSeek 优先:默认提供商为 deepseek,内置深度优化预设。
-- 类型注解完整,中文 docstring。
 """
 
 from __future__ import annotations
@@ -35,6 +38,8 @@ from agentkit.llm.base import (
 from agentkit.llm.mock import MockClient
 from agentkit.llm.openai import OpenAIClient
 from agentkit.llm.deepseek import DeepSeekClient
+from agentkit.llm.mimo import MiMoClient
+from agentkit.llm.thinking import ThinkingOptions
 from agentkit.llm.provider import (
     LLMProvider,
     DeepSeekOptions,
@@ -44,6 +49,16 @@ from agentkit.llm.provider import (
     resolve_provider,
     create_client,
     PRESET_PROVIDERS,
+)
+# 多模态 content part 构造助手(纯函数,返回原生 dict)
+from agentkit.llm.media import (
+    text as media_text,
+    image_url,
+    image_base64,
+    audio_url,
+    audio_base64,
+    video_url,
+    video_base64,
 )
 
 
@@ -58,7 +73,10 @@ __all__ = [
     # 客户端实现
     "OpenAIClient",
     "DeepSeekClient",
+    "MiMoClient",
     "MockClient",
+    # 思考模式工具
+    "ThinkingOptions",
     # 提供商配置层
     "LLMProvider",
     "DeepSeekOptions",
@@ -72,6 +90,14 @@ __all__ = [
     "set_default_client",
     "get_default_client",
     "clear_default_client",
+    # 多模态 content part 构造助手(详见 agentkit.llm.media)
+    "media_text",
+    "image_url",
+    "image_base64",
+    "audio_url",
+    "audio_base64",
+    "video_url",
+    "video_base64",
 ]
 
 

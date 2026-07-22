@@ -93,10 +93,11 @@ class MockClient(LLMClient):
         """把 script dict 转换为 ``LLMResponse``。
 
         支持的 key：
-            - ``content``:     文本内容
-            - ``tool_calls``:  list[dict]，每个 dict 含 id / name / arguments
-            - ``finish_reason``: 结束原因（可选）
-            - ``usage``:       LLMUsage 或 dict（可选）
+            - ``content``:            文本内容
+            - ``reasoning_content``:  思考链内容(存入 raw 供 LLMStep 回填)
+            - ``tool_calls``:         list[dict]，每个 dict 含 id / name / arguments
+            - ``finish_reason``:      结束原因（可选）
+            - ``usage``:              LLMUsage 或 dict（可选）
         """
         tool_calls: list[ToolCall] = []
         for tc in item.get("tool_calls") or []:
@@ -107,11 +108,15 @@ class MockClient(LLMClient):
                     arguments=tc.get("arguments", {}) or {},
                 )
             )
+        raw: dict[str, Any] | None = None
+        if item.get("reasoning_content"):
+            raw = {"reasoning_content": item["reasoning_content"]}
         return LLMResponse(
             content=item.get("content"),
             tool_calls=tool_calls,
             finish_reason=item.get("finish_reason", ""),
             usage=item.get("usage", None) or LLMUsage(),  # type: ignore[arg-type]
+            raw=raw,
         )
 
     def add_response(self, resp: LLMResponse) -> None:

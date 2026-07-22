@@ -174,15 +174,18 @@ class LifecycleHooks(ABC):
         accumulated: str,
         *,
         attempt: int = 0,
+        delta_reasoning: str | None = None,
     ) -> None:
         """流式文本片段。
 
         Args:
-            step:        发起流式调用的 Step。
-            agent:       发起调用的 AgentConfig。
-            delta:       本次增量文本。
-            accumulated: 本次 attempt 内的累计文本(retry 时已重置)。
-            attempt:     第几次尝试(同 on_llm_stream_start)。
+            step:            发起流式调用的 Step。
+            agent:           发起调用的 AgentConfig。
+            delta:           本次增量文本。
+            accumulated:     本次 attempt 内的累计文本(retry 时已重置)。
+            attempt:         第几次尝试(同 on_llm_stream_start)。
+            delta_reasoning: 思考链增量(与 delta 同构,框架只透传不累积)。
+                             ``None`` 表示本片段无思考链。
         """
         ...
 
@@ -719,10 +722,12 @@ class CompositeHooks(LifecycleHooks):
         accumulated: str,
         *,
         attempt: int = 0,
+        delta_reasoning: str | None = None,
     ) -> None:
         for h in self.hooks:
             await h.on_llm_stream_delta(
-                step, agent, delta, accumulated, attempt=attempt
+                step, agent, delta, accumulated, attempt=attempt,
+                delta_reasoning=delta_reasoning,
             )
 
     async def on_llm_stream_end(

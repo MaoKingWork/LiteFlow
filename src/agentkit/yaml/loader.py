@@ -33,6 +33,7 @@ from typing import Any
 from agentkit.config import RetryPolicy
 from agentkit.core.agent import AgentConfig
 from agentkit.core.hooks import LifecycleHooks
+from agentkit.core.ports import InputPort, OutputPort, PortType
 from agentkit.core.workflow import Workflow
 from agentkit.mcp.manager import MCPManager, MCPServerConfig
 from agentkit.skill.loader import SkillLoader
@@ -150,6 +151,96 @@ def _step_prompt(step_dict: dict) -> str | None:
     return step_dict.get("input")
 
 
+# ---------------------------------------------------------------------------
+# 端口声明编译
+# ---------------------------------------------------------------------------
+def _compile_port_spec(
+    spec: Any, port_cls: type
+) -> list:
+    """把 YAML 端口声明编译为 InputPort/OutputPort 列表。
+
+    支持简写阶梯:
+        - ``[a, b]``                 → ``[{name: a}, {name: b}]``
+        - ``{a: str, b: int}``       → ``[{name: a, type: str}, {name: b, type: int}]``
+        - ``[{name: a, type: str}]`` → 原样
+
+    Args:
+        spec:     YAML 中的 inputs/outputs 声明。
+        port_cls: InputPort 或 OutputPort。
+
+    Returns:
+        list[InputPort | OutputPort]: 编译后的端口列表。
+    """
+    if spec is None:
+        return []
+    ports: list = []
+    if isinstance(spec, dict):
+        # dict 简写：{name: type_str} 或 {name: schema_dict}
+        for name, type_spec in spec.items():
+            kwargs: dict[str, Any] = {"name": name}
+            if isinstance(type_spec, str):
+                kwargs["type"] = PortType.parse(type_spec)
+            elif isinstance(type_spec, dict) and "type" not in type_spec:
+                # 纯 schema dict（无 name/type/required 等端口字段）
+                kwargs["type"] = PortType.parse(type_spec)
+            ports.append(port_cls(**kwargs))
+    elif isinstance(spec, list):
+        for item in spec:
+            if isinstance(item, str):
+                ports.append(port_cls(name=item))
+            elif isinstance(item, dict):
+                kwargs = _compile_port_fields(item)
+                ports.append(port_cls(**kwargs))
+            else:
+                raise ValueError(f"端口声明列表项不支持 {type(item).__name__}: {item!r}")
+    else:
+        raise ValueError(f"端口声明不支持 {type(spec).__name__}: {spec!r}")
+    return ports
+
+
+def _compile_port_fields(item: dict) -> dict[str, Any]:
+    """把单个端口的 dict 声明编译为构造参数。
+
+    处理 name / from / type / schema / required / strict / default / description。
+    ``type`` 与 ``schema`` 互斥。
+    """
+    kwargs: dict[str, Any] = {}
+    if "name" not in item:
+        raise ValueError(f"端口声明缺少 name 字段: {item!r}")
+    kwargs["name"] = item["name"]
+    if "from" in item:
+        kwargs["from_"] = item["from"]
+    if "type" in item and "schema" in item:
+        raise ValueError(
+            f"端口 {item['name']!r} 的 type 与 schema 不可同时声明"
+        )
+    if "type" in item:
+        kwargs["type"] = PortType.parse(item["type"])
+    elif "schema" in item:
+        kwargs["type"] = PortType.parse(item["schema"])
+    if "required" in item:
+        kwargs["required"] = bool(item["required"])
+    if "strict" in item:
+        kwargs["strict"] = bool(item["strict"])
+    if "default" in item:
+        kwargs["default"] = item["default"]
+    if "description" in item:
+        kwargs["description"] = str(item["description"])
+    return kwargs
+
+
+def _compile_step_ports(step_dict: dict) -> tuple[list, list, bool]:
+    """从 step_dict 编译 inputs/outputs/strict_scope。
+
+    Returns:
+        tuple: (inputs, outputs, strict_scope)
+    """
+    inputs = _compile_port_spec(step_dict.get("inputs"), InputPort)
+    outputs = _compile_port_spec(step_dict.get("outputs"), OutputPort)
+    strict_scope = bool(step_dict.get("strict_scope", False))
+    return inputs, outputs, strict_scope
+
+
 def _compile_step(
     step_dict: dict,
     agent_configs: dict[str, AgentConfig],
@@ -177,6 +268,12 @@ def _compile_step(
     retry = _parse_retry(step_dict.get("retry"))
     timeout = step_dict.get("timeout")
 
+    # 端口声明编译（llm / tool / skill 支持显式端口）
+    if step_type in ("llm", "tool", "skill"):
+        inputs, outputs_list, strict_scope = _compile_step_ports(step_dict)
+    else:
+        inputs, outputs_list, strict_scope = [], [], False
+
     # 按类型分发
     if step_type == "llm":
         agent_ref = step_dict.get("agent", "")
@@ -193,6 +290,9 @@ def _compile_step(
             stream=bool(step_dict.get("stream", False)),
             retry=retry,
             timeout=timeout,
+            inputs=inputs,
+            outputs=outputs_list,
+            strict_scope=strict_scope,
         )
 
     elif step_type == "tool":
@@ -204,6 +304,9 @@ def _compile_step(
             role=step_dict.get("role"),
             retry=retry,
             timeout=timeout,
+            inputs=inputs,
+            outputs=outputs_list,
+            strict_scope=strict_scope,
         )
 
     elif step_type == "skill":
@@ -215,6 +318,9 @@ def _compile_step(
             model=step_dict.get("model"),
             retry=retry,
             timeout=timeout,
+            inputs=inputs,
+            outputs=outputs_list,
+            strict_scope=strict_scope,
         )
 
     elif step_type == "condition":
@@ -317,8 +423,13 @@ def _compile_agents(agents_list: list[dict]) -> dict[str, AgentConfig]:
 def _compile_providers(providers_list: list[dict]) -> None:
     """从 YAML ``providers`` 段注册自定义 LLM 提供商。
 
-    预设提供商(deepseek / openai)只需提供 name + api_key 即可覆盖;
+    预设提供商(deepseek / mimo / mimo-omni)只需提供 name + api_key 即可覆盖;
     自定义提供商需提供 name + base_url + api_key + model。
+
+    options 段按提供商类型解析:
+        - deepseek / deepseek-flash: ``DeepSeekOptions``(thinking / reasoning_effort / json_output)
+        - mimo / mimo-omni:          ``ThinkingOptions``(thinking / json_output)
+        - 其他:                       原样存为 dict,不解析
 
     Args:
         providers_list: Provider 配置 dict 列表。
@@ -330,21 +441,30 @@ def _compile_providers(providers_list: list[dict]) -> None:
         get_provider,
         PRESET_PROVIDERS,
     )
+    from agentkit.llm.thinking import ThinkingOptions
 
     for prov_dict in providers_list:
         name = prov_dict.get("name", "")
         if not name:
             continue
 
-        # 解析 options(DeepSeek 特有)
+        # 解析 options(按提供商类型)
         options = None
         opts_dict = prov_dict.get("options")
-        if opts_dict and name == "deepseek":
-            options = DeepSeekOptions(
-                thinking=opts_dict.get("thinking"),
-                reasoning_effort=opts_dict.get("reasoning_effort"),
-                json_output=bool(opts_dict.get("json_output", False)),
-            )
+        if opts_dict:
+            if name in ("deepseek", "deepseek-flash"):
+                options = DeepSeekOptions(
+                    thinking=opts_dict.get("thinking"),
+                    reasoning_effort=opts_dict.get("reasoning_effort"),
+                    json_output=bool(opts_dict.get("json_output", False)),
+                    max_completion_tokens=opts_dict.get("max_completion_tokens"),
+                )
+            elif name in ("mimo", "mimo-omni"):
+                options = ThinkingOptions(
+                    thinking=opts_dict.get("thinking"),
+                    json_output=bool(opts_dict.get("json_output", False)),
+                    max_completion_tokens=opts_dict.get("max_completion_tokens"),
+                )
 
         # 如果是预设提供商,取预设为底,用 YAML 配置覆盖
         if name in PRESET_PROVIDERS:

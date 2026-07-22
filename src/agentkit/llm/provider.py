@@ -36,6 +36,8 @@ import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from agentkit.llm.thinking import ThinkingOptions
+
 if TYPE_CHECKING:
     from agentkit.llm.base import LLMClient
 
@@ -53,26 +55,24 @@ __all__ = [
 
 
 # ---------------------------------------------------------------------------
-# DeepSeekOptions —— DeepSeek 深度优化选项
+# DeepSeekOptions —— DeepSeek 深度优化选项(继承 ThinkingOptions)
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
-class DeepSeekOptions:
+class DeepSeekOptions(ThinkingOptions):
     """DeepSeek 深度优化选项。
 
-    封装 DeepSeek API 特有参数,在创建 ``DeepSeekClient`` 时传入。
+    继承 ``ThinkingOptions`` 的共有思考参数(thinking / json_output /
+    max_completion_tokens),增加 DeepSeek 专属的 ``reasoning_effort``。
 
     Attributes:
-        thinking:        思考模式开关:``"enabled"`` | ``"disabled"`` | ``None``。
-                         ``None`` 表示不传该参数(用 API 默认值)。
-        reasoning_effort: 思考强度:``"high"`` | ``"max"`` | ``None``。
-                         仅在 thinking=enabled 时生效。``None`` 表示不传。
-        json_output:     是否强制 JSON Output(response_format=json_object)。
-                         为 True 时每次请求自动注入 response_format。
+        thinking:              思考模式开关:``"enabled"`` | ``"disabled"`` | ``None``。
+        json_output:           是否强制 JSON Output。
+        max_completion_tokens: 最大输出 token 数(含思考链)。
+        reasoning_effort:      思考强度:``"high"`` | ``"max"`` | ``None``。
+                               仅在 thinking=enabled 时生效。``None`` 表示不传。
     """
 
-    thinking: str | None = None
     reasoning_effort: str | None = None
-    json_output: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -86,15 +86,17 @@ class LLMProvider:
     Chat Completions API 规范(``POST {base_url}/chat/completions``)。
 
     Attributes:
-        name:        提供商标识(如 ``"deepseek"`` / ``"deepseek-flash"`` / 自定义名)。
+        name:        提供商标识(如 ``"deepseek"`` / ``"mimo"`` / 自定义名)。
         base_url:    API 根地址(如 ``"https://api.deepseek.com"``)。
         api_key:     API Key;``None`` 时从环境变量读取(见 ``api_key_env``)。
         api_key_env: API Key 环境变量名;``api_key`` 为 None 时从此读取。
         model:       默认模型名(如 ``"deepseek-v4-pro"``)。
-        provider_type: 提供商类型:``"deepseek"`` | ``"openai"``。
+        provider_type: 提供商类型:``"deepseek"`` | ``"mimo"`` | ``"openai"``。
                       ``"deepseek"`` 创建 ``DeepSeekClient``(深度优化);
+                      ``"mimo"`` 创建 ``MiMoClient``(思考 + 多模态);
                       ``"openai"`` 创建 ``OpenAIClient``(通用兼容)。
-        options:     提供商特有选项(如 ``DeepSeekOptions``);通用提供商为 None。
+        options:     提供商特有选项(如 ``DeepSeekOptions`` / ``ThinkingOptions``);
+                      通用提供商为 None。
     """
 
     name: str
@@ -128,9 +130,12 @@ class LLMProvider:
 #                       适合复杂推理任务。
 #   - "deepseek-flash": Flash 模型,默认非思考模式(更快更便宜),
 #                       适合简单任务与高并发场景;可按需开启思考。
-# 两者共享同一 base_url 与 api_key,仅 model 与默认 options 不同。
-# 其他 OpenAI 兼容提供商通过 YAML providers 段或 register_provider 注册,
-# 需提供 base_url + api_key + model。
+# MiMo 两个模型(共享 base_url 与 MIMO_API_KEY):
+#   - "mimo":          Pro 模型(mimo-v2.5-pro),默认开启思考模式,
+#                       文本推理强项。
+#   - "mimo-omni":     全模态模型(mimo-v2.5),默认开启思考模式,
+#                       支持图片/音频/视频理解。
+# 其他 OpenAI 兼容提供商通过 YAML providers 段或 register_provider 注册。
 PRESET_PROVIDERS: dict[str, LLMProvider] = {
     "deepseek": LLMProvider(
         name="deepseek",
@@ -155,6 +160,22 @@ PRESET_PROVIDERS: dict[str, LLMProvider] = {
             reasoning_effort=None,
             json_output=False,
         ),
+    ),
+    "mimo": LLMProvider(
+        name="mimo",
+        base_url="https://api.xiaomimimo.com/v1",
+        api_key_env="MIMO_API_KEY",
+        model="mimo-v2.5-pro",
+        provider_type="mimo",
+        options=ThinkingOptions(thinking="enabled"),
+    ),
+    "mimo-omni": LLMProvider(
+        name="mimo-omni",
+        base_url="https://api.xiaomimimo.com/v1",
+        api_key_env="MIMO_API_KEY",
+        model="mimo-v2.5",
+        provider_type="mimo",
+        options=ThinkingOptions(thinking="enabled"),
     ),
 }
 
@@ -332,6 +353,16 @@ def create_client(provider: LLMProvider | str | None = None) -> "LLMClient":
             base_url=provider.base_url,
             model=provider.model,
             options=provider.options or DeepSeekOptions(),
+        )
+    elif provider.provider_type == "mimo":
+        from agentkit.llm.mimo import MiMoClient
+        from agentkit.llm.thinking import ThinkingOptions
+
+        return MiMoClient(
+            api_key=provider.resolve_api_key(),
+            base_url=provider.base_url,
+            model=provider.model,
+            options=provider.options or ThinkingOptions(thinking="enabled"),
         )
     else:
         # 通用 OpenAI 兼容客户端

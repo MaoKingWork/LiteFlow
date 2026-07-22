@@ -34,6 +34,16 @@ from agentkit.config import RetryPolicy, get_default
 # ErrorAction 为纯枚举,运行时导入不会触发 hooks 模块的重型类加载,
 # 也不会造成循环依赖(hooks 仅在 TYPE_CHECKING 下导入 steps.base)。
 from agentkit.core.hooks import ErrorAction
+from agentkit.core.ports import (
+    MISSING,
+    ClosedScopeContext,
+    InputPort,
+    OutputPort,
+    PortBindingError,
+    PortScopeContext,
+    PortType,
+    PortTypeError,
+)
 
 if TYPE_CHECKING:
     # 仅用于类型注解,运行时不导入,避免循环依赖。
@@ -144,14 +154,39 @@ class BaseStep(ABC):
         output: str | None = None,
         retry: RetryPolicy | None = None,
         timeout: float | None = None,
+        *,
+        inputs: list[InputPort] | None = None,
+        outputs: list[OutputPort] | None = None,
+        strict_scope: bool = False,
     ) -> None:
         self.id: str = id
-        self.output: str | None = output
         self.retry: RetryPolicy | None = retry
         self.timeout: float | None = timeout
+        # 端口系统：output 是 outputs 的语法糖；二者不可同时声明
+        self.inputs: list[InputPort] = list(inputs) if inputs else []
+        self.outputs: list[OutputPort] = []
+        if output and outputs:
+            raise ValueError(
+                f"Step {id!r} 的 output 与 outputs 不可同时声明"
+            )
+        if output:
+            self.outputs = [OutputPort(name=output)]
+        elif outputs:
+            self.outputs = list(outputs)
+        # strict_scope: True 时封闭输入作用域（切断全局 Context 回退）
+        self.strict_scope: bool = strict_scope
         # 运行期 hooks 引用:由 execute 在调用 run 前设置,供子类(如 LLMStep)
         # 在 run 内部触发 on_llm_call / on_tool_call 等细粒度钩子。
         self._hooks: "LifecycleHooks | None" = None
+        # 运行期端口绑定:由 _bind_inputs 在 run 前填充,供 _render 使用。
+        self._port_bindings: dict[str, Any] = {}
+
+    @property
+    def output(self) -> str | None:
+        """单输出端口的 name（向后兼容）；多输出或无输出时为 None。"""
+        if len(self.outputs) == 1:
+            return self.outputs[0].name
+        return None
 
     def bind_mcp_manager(self, manager: "MCPManager | None") -> None:
         """注入 MCP 管理器引用。
@@ -236,6 +271,9 @@ class BaseStep(ABC):
         # 1b) 暴露 hooks 给子类 run 使用(LLMStep 据此触发 on_llm_call 等)
         self._hooks = hooks
 
+        # 1c) 输入端口绑定：校验来源值存在性与类型（声明端口时生效）
+        self._bind_inputs(ctx)
+
         # 2) 解析重试策略:max_attempts = 首次执行 + 重试次数;无策略时仅执行 1 次
         policy = self.effective_retry(retry_policy)
         max_attempts = (policy.count + 1) if policy else 1
@@ -248,6 +286,8 @@ class BaseStep(ABC):
                 await asyncio.wait_for(
                     self.run(ctx), timeout=self.effective_timeout()
                 )
+                # 成功:校验输出端口（声明端口时生效）
+                self._validate_outputs(ctx)
                 # 成功:记录状态与重试次数,退出循环
                 trace.status = "success"
                 trace.retry_count = attempt
@@ -293,13 +333,14 @@ class BaseStep(ABC):
                     await hooks.after_step(self, ctx, trace)
                 raise last_error
             elif action is ErrorAction.SKIP:
-                # 跳过本 Step,继续下一步;output 未被写入时填 None 兜底
+                # 跳过本 Step,继续下一步;单输出端口未写入时填 None 兜底
+                # 多输出端口不自动填，保持失败语义清晰
                 trace.status = "skipped"
                 trace.error = str(last_error)
                 if self.output and not ctx.has(self.output):
                     ctx.set(self.output, None)
             elif action is ErrorAction.DEFAULT:
-                # 标记失败但用默认值填充 output,继续下一步
+                # 标记失败但用默认值填充单输出端口,继续下一步
                 trace.status = "failed"
                 if self.output:
                     ctx.set(self.output, None)
@@ -374,6 +415,117 @@ class BaseStep(ABC):
         """
         # 默认无操作;子类按需重写。
         return None
+
+    # ---- 端口系统 ------------------------------------------------------
+    def _bind_inputs(self, ctx: "Context") -> None:
+        """输入端口绑定：校验来源值存在性与类型，构造端口绑定字典。
+
+        遍历 ``self.inputs``，按 ``from``（默认 ``name``）从 ctx 取值：
+            - required=True 且缺失 → 抛 PortBindingError。
+            - required=False 且缺失 → 用 default（未设则 None）。
+            - 声明了 type → PortType.validate 校验（strict 默认 True 拒绝隐式转换）。
+
+        绑定结果存到 ``self._port_bindings``，供 ``_render`` 使用。
+        不声明 inputs 时为空字典，_render 退化为直接用 ctx。
+        """
+        from agentkit.core.context import to_mutable
+
+        bindings: dict[str, Any] = {}
+        for port in self.inputs:
+            source = port.source
+            if ctx.has(source):
+                # ctx.get 返回冻结视图，转回可变类型供模板解析与类型校验
+                value = to_mutable(ctx.get(source))
+            else:
+                if port.required:
+                    raise PortBindingError(
+                        f"Step {self.id!r} 的输入端口 {port.name!r} "
+                        f"(来源 {source!r}) 缺失且 required=True"
+                    )
+                value = port.default if port.default is not MISSING else None
+            if port.type is not None:
+                value = port.type.validate(value, strict=port.strict)
+            bindings[port.name] = value
+        self._port_bindings = bindings
+
+    def _validate_outputs(self, ctx: "Context") -> None:
+        """输出端口校验：检查 required 产出与类型。
+
+        遍历 ``self.outputs``：
+            - required=True 且 ctx 无 name → 抛 PortBindingError。
+            - 声明了 type → PortType.validate 校验（先 to_mutable 解冻）。
+        """
+        from agentkit.core.context import to_mutable
+
+        for port in self.outputs:
+            if not ctx.has(port.name):
+                if port.required:
+                    raise PortBindingError(
+                        f"Step {self.id!r} 的输出端口 {port.name!r} "
+                        f"未产出且 required=True"
+                    )
+                # 非 required：填 None 兜底
+                ctx.set(port.name, None)
+                continue
+            if port.type is not None:
+                # ctx.get 返回冻结视图（FrozenDict/tuple），转回可变类型再校验
+                value = to_mutable(ctx.get(port.name))
+                port.type.validate(value, strict=port.strict)
+
+    def _get_render_scope(self, ctx: "Context") -> Any:
+        """构造模板解析的作用域 context。
+
+        - 无端口绑定：返回原 ctx（行为同现状）。
+        - strict_scope=True：返回 ClosedScopeContext（仅允许端口变量）。
+        - 否则：返回 PortScopeContext（端口优先，其余透传父 ctx）。
+        """
+        if not self._port_bindings:
+            return ctx
+        if self.strict_scope:
+            return ClosedScopeContext(self._port_bindings)
+        return PortScopeContext(ctx, self._port_bindings)
+
+    def _render(self, template: Any, ctx: "Context") -> Any:
+        """模板解析（对应 resolve_value）：叠加端口作用域。
+
+        整体单 ``{{var}}`` 返回原始对象；否则返回拼接 str。
+        不声明端口时退化为 ``resolve_value(template, ctx)``，行为完全同现状。
+        """
+        from agentkit.core.template import resolve_value
+
+        scope = self._get_render_scope(ctx)
+        return resolve_value(template, scope)
+
+    def _render_str(self, template: str, ctx: "Context") -> str:
+        """模板解析（对应 resolve_template）：始终返回 str，叠加端口作用域。
+
+        不声明端口时退化为 ``resolve_template(template, ctx)``。
+        """
+        from agentkit.core.template import resolve_template
+
+        scope = self._get_render_scope(ctx)
+        return resolve_template(template, scope)
+
+    def _emit_dict_outputs(self, ctx: "Context", result: dict) -> None:
+        """多输出端口拆分：把 dict 结果按端口 name 写入 Context。
+
+        供 ToolStep / LLMStep 在多输出场景调用。缺失的 required 端口报错，
+        非 required 端口填 None。
+
+        Args:
+            ctx:     当前上下文。
+            result:  工具/LLM 返回的 dict（按端口 name 取字段）。
+        """
+        for port in self.outputs:
+            if port.name in result:
+                ctx.set(port.name, result[port.name])
+            elif port.required:
+                raise PortBindingError(
+                    f"Step {self.id!r} 多输出拆分：结果 dict 缺少字段 "
+                    f"{port.name!r} 且 required=True"
+                )
+            else:
+                ctx.set(port.name, None)
 
 
 # ---------------------------------------------------------------------------

@@ -53,7 +53,9 @@ class SkillStep(BaseStep):
     Args:
         id:      Step 实例标识。
         skill:   Skill 注册名(如 ``"web_search"``)。
-        prompt:  user 提示词模板,支持 ``{{var}}`` / ``${ENV}``。
+        prompt:  user 提示词模板,支持 ``{{var}}`` / ``${ENV}``。可为
+                 ``list[dict]``(多模态 content parts,如图片/音频/视频),
+                 透传给 LLMStep 处理。
         output:  输出键名。
         model:   模型覆盖(可选);不指定时用 AgentConfig 默认。
         retry:   实例级重试策略。
@@ -76,15 +78,21 @@ class SkillStep(BaseStep):
         self,
         id: str = "",
         skill: str = "",
-        prompt: str | None = None,
+        prompt: str | list[dict] | None = None,
         output: str | None = None,
         model: str | None = None,
         retry: "RetryPolicy | None" = None,
         timeout: float | None = None,
         *,
         input: str | None = None,
+        inputs: list | None = None,
+        outputs: list | None = None,
+        strict_scope: bool = False,
     ) -> None:
-        super().__init__(id=id, output=output, retry=retry, timeout=timeout)
+        super().__init__(
+            id=id, output=output, retry=retry, timeout=timeout,
+            inputs=inputs, outputs=outputs, strict_scope=strict_scope,
+        )
         # prompt / input 互斥:同时指定视为配置错误,避免歧义
         if prompt is not None and input is not None:
             raise ValueError(
@@ -99,7 +107,8 @@ class SkillStep(BaseStep):
             prompt = input
         self.skill_name: str = skill
         # 命名与 LLMStep.prompt 对齐,消除 input/prompt 二义性
-        self.prompt: str | None = prompt
+        # 支持 str 与 list[dict](多模态 content parts),透传给 LLMStep
+        self.prompt: str | list[dict] | None = prompt
         self.model_override: str | None = model
         # 运行期 scratch
         self._current_hooks: "LifecycleHooks | None" = None
@@ -128,7 +137,7 @@ class SkillStep(BaseStep):
             max_tool_iterations=manifest.max_tool_iterations,
         )
 
-        # 委托 LLMStep 执行(prompt / mcp_manager / llm_client 一并透传)
+        # 委托 LLMStep 执行(prompt / mcp_manager / llm_client / 端口 一并透传)
         llm_step = LLMStep(
             id=self.id or f"skill_{manifest.name}",
             agent=agent_config,
@@ -137,6 +146,9 @@ class SkillStep(BaseStep):
             retry=self.retry,
             timeout=self.timeout,
             llm_client=self.llm_client,
+            inputs=self.inputs,
+            outputs=self.outputs,
+            strict_scope=self.strict_scope,
         )
         # 把 Workflow 注入的 mcp_manager 传递给内部 LLMStep,使其能注入 MCP 工具
         llm_step.mcp_manager = self.mcp_manager
