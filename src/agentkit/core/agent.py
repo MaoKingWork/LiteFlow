@@ -96,6 +96,10 @@ class AgentConfig:
     Attributes:
         name:                注册名，由 ``@agent`` 装饰器设置。
         model:               LLM 模型名。
+        provider:            LLM 提供商名（如 ``"deepseek"`` / ``"mimo"``）。
+                             ``None`` 时由 LLMStep 按模型名自动反查提供商,
+                             反查不到则用全局默认提供商。显式指定可消除多
+                             提供商同模型名的歧义。
         system:              系统提示词。
         output_model:        输出契约 Pydantic Model，``None`` 表示自由文本。
         temperature:         采样温度。
@@ -111,6 +115,7 @@ class AgentConfig:
 
     name: str = ""
     model: str = "gpt-4o-mini"
+    provider: str | None = None
     system: str = ""
     output_model: type[BaseModel] | None = None
     temperature: float = 0.2

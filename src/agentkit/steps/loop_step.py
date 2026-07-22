@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import ast
 from typing import TYPE_CHECKING, Any
 
 from agentkit.config import get_default
@@ -55,7 +56,14 @@ class LoopStep(BaseStep):
         step:    循环体(单个 ``BaseStep`` 或 ``ConditionStep``)。
         max:     最大迭代次数(硬上限,防死循环);``None`` 用全局默认。
         on_max:  条件重试达到上限时的策略:``fail``(抛异常) | ``continue``(跳过)。
-        output:  迭代模式:收集结果的键名;不指定时用内部 Step 的 output。
+        output:  聚合目标键名;``collect`` 模式收集为列表,``append``/``last`` 写入该键。
+        output_mode: 迭代结果聚合方式:
+
+            - ``collect``(默认):每次 body 产出收集为列表,写入 ``output``。
+            - ``append``:每次 body 产出作为增量,累加为字符串写入 ``output``。
+            - ``last``:仅保留 body 最后一次产出,不收集。
+
+        separator: ``append`` 模式的拼接分隔符(默认空串)。
         retry:   实例级重试策略。
         timeout: 实例级超时秒数。
 
@@ -86,6 +94,22 @@ class LoopStep(BaseStep):
             input: "{{draft}}"
             output: draft
           on_max: fail
+
+    用法示例 — 增量累加(YAML)::
+
+        - id: write_chapters
+          type: loop
+          iter: "[2, 3, 4, 5]"
+          as: chapter_num
+          output_mode: append
+          output: story_markdown
+          separator: "\\n\\n"
+          step:
+            id: write_next
+            type: llm
+            agent: story_writer
+            prompt: "续写第{{chapter_num}}章,只输出新章节正文。"
+            output: story_markdown
     """
 
     type = "loop"
@@ -100,6 +124,8 @@ class LoopStep(BaseStep):
         max: int | None = None,
         on_max: str = "fail",
         output: str | None = None,
+        output_mode: str = "collect",
+        separator: str = "",
         retry: "RetryPolicy | None" = None,
         timeout: float | None = None,
     ) -> None:
@@ -110,6 +136,8 @@ class LoopStep(BaseStep):
         self.body: BaseStep | None = step
         self.max_iterations: int | None = max
         self.on_max: str = on_max
+        self.output_mode: str = output_mode
+        self.separator: str = separator
         # 运行期 scratch
         self._current_hooks: "LifecycleHooks | None" = None
         self._current_retry_policy: "RetryPolicy | None" = None
@@ -145,7 +173,12 @@ class LoopStep(BaseStep):
     # 迭代模式
     # ------------------------------------------------------------------
     async def _run_iter_mode(self, ctx: "Context") -> None:
-        """遍历 ``iter`` 列表,对每个元素执行内部 Step,收集结果。"""
+        """遍历 ``iter`` 列表,按 ``output_mode`` 聚合结果。
+
+        - ``collect``:每次 body 产出收集为列表,写入 ``output``。
+        - ``append``:每次 body 产出作为增量,累加为字符串写入 ``output``。
+        - ``last``:仅保留 body 最后一次产出,不收集。
+        """
         assert self.body is not None
         assert self.iter_tpl is not None
 
@@ -153,8 +186,19 @@ class LoopStep(BaseStep):
         items = resolve_value(self.iter_tpl, ctx)
         if items is None:
             items = []
-        elif isinstance(items, (str, bytes, dict)):
-            # 标量 / dict 不可迭代为列表,包装为单元素列表
+        elif isinstance(items, str):
+            # 字符串:[...] / (...) 字面量尝试解析为 list;否则视为单元素
+            stripped = items.strip()
+            if stripped.startswith(("[", "(")) and stripped.endswith(("]", ")")):
+                try:
+                    parsed = ast.literal_eval(stripped)
+                    items = list(parsed) if isinstance(parsed, (list, tuple)) else [items]
+                except (ValueError, SyntaxError):
+                    items = [items]
+            else:
+                items = [items]
+        elif isinstance(items, (bytes, dict)):
+            # bytes / dict 不可迭代为列表,包装为单元素列表
             items = [items]
         else:
             try:
@@ -167,50 +211,67 @@ class LoopStep(BaseStep):
         if len(items) > max_iter:
             items = items[:max_iter]
 
-        # 确定收集结果的 output key
-        output_key = self.output or self.body.output
-        collected: list[Any] = []
+        body_out = self.body.output
+        out_key = self.output or body_out
 
-        for item in items:
-            # 设置当前元素到 Context
-            ctx.set(self.item_var, item)
-            # 执行内部 Step
-            await self.body.execute(
-                ctx,
-                self._current_hooks,
-                retry_policy=self._current_retry_policy,
-            )
-            self._loop_count += 1
-            # 收集结果
-            if output_key and ctx.has(output_key):
-                collected.append(ctx.get(output_key))
-
-        # 写入收集结果
-        if output_key:
-            ctx.set(output_key, collected)
+        if self.output_mode == "append":
+            acc = self._seed_acc(ctx, out_key)
+            for item in items:
+                ctx.set(self.item_var, item)
+                await self._exec_body(ctx)
+                acc = self._append_delta(ctx, acc, out_key, body_out)
+        elif self.output_mode == "last":
+            for item in items:
+                ctx.set(self.item_var, item)
+                await self._exec_body(ctx)
+            # body.output 自然保留最后一次写入,无需额外处理
+        else:  # collect
+            collected: list[Any] = []
+            for item in items:
+                ctx.set(self.item_var, item)
+                await self._exec_body(ctx)
+                # 修复:从 body 实际写入的键读取,而非聚合目标
+                if body_out and ctx.has(body_out):
+                    collected.append(ctx.get(body_out))
+            if out_key:
+                ctx.set(out_key, collected)
 
     # ------------------------------------------------------------------
     # 条件重试模式
     # ------------------------------------------------------------------
     async def _run_until_mode(self, ctx: "Context") -> None:
-        """重复执行内部 Step 直到 ``until`` 为真或达到 ``max`` 上限。"""
+        """重复执行内部 Step 直到 ``until`` 为真或达到 ``max`` 上限。
+
+        ``output_mode`` 与迭代模式对称:
+        ``collect`` 记录每次尝试、``append`` 渐进累加、``last`` 保留最终结果。
+        """
         assert self.body is not None
         assert self.until_expr is not None
 
         max_iter = self._effective_max()
-        for _ in range(max_iter):
-            await self.body.execute(
-                ctx,
-                self._current_hooks,
-                retry_policy=self._current_retry_policy,
-            )
-            self._loop_count += 1
+        body_out = self.body.output
+        out_key = self.output or body_out
 
-            # 检查退出条件
+        collected: list[Any] = []
+        acc = self._seed_acc(ctx, out_key) if self.output_mode == "append" else ""
+
+        for _ in range(max_iter):
+            await self._exec_body(ctx)
+
+            if self.output_mode == "append":
+                acc = self._append_delta(ctx, acc, out_key, body_out)
+            elif self.output_mode == "collect":
+                if body_out and ctx.has(body_out):
+                    collected.append(ctx.get(body_out))
+
             if eval_expression(self.until_expr, ctx):
+                if self.output_mode == "collect" and out_key:
+                    ctx.set(out_key, collected)
                 return
 
         # 达到上限
+        if self.output_mode == "collect" and out_key:
+            ctx.set(out_key, collected)
         if self.on_max == "fail":
             raise LoopMaxReachedError(
                 f"LoopStep {self.id!r} 达到最大迭代次数 {max_iter} "
@@ -219,7 +280,55 @@ class LoopStep(BaseStep):
         # on_max == "continue":静默继续
 
     # ------------------------------------------------------------------
-    # 辅助
+    # 辅助:执行 body 单次
+    # ------------------------------------------------------------------
+    async def _exec_body(self, ctx: "Context") -> None:
+        """执行循环体一次,递增计数。"""
+        await self.body.execute(
+            ctx,
+            self._current_hooks,
+            retry_policy=self._current_retry_policy,
+        )
+        self._loop_count += 1
+
+    def _seed_acc(self, ctx: "Context", out_key: str | None) -> str:
+        """append 模式:读取累加种子(已有值续写,否则空串起步)。
+
+        无种子时预设空串到 ctx,使 body 可安全引用 ``{{out_key}}``
+        (配合 ``{{#if out_key}}`` 区分首章与续写),避免缺失 key 抛 KeyError。
+        """
+        if out_key and ctx.has(out_key):
+            acc = ctx.get(out_key, "")
+            return acc if isinstance(acc, str) else str(acc)
+        if out_key:
+            ctx.set(out_key, "")
+        return ""
+
+    def _append_delta(
+        self,
+        ctx: "Context",
+        acc: str,
+        out_key: str | None,
+        body_out: str | None,
+    ) -> str:
+        """append 模式:读取 body 增量,累加到 acc 并同步写回 out_key。
+
+        每次迭代后写回 acc,保证同名式(body.output == output)下
+        body 下次能读到完整累加值。
+        """
+        delta = ""
+        if body_out and ctx.has(body_out):
+            delta = ctx.get(body_out, "") or ""
+            if not isinstance(delta, str):
+                delta = str(delta)
+        if delta:
+            acc = f"{acc}{self.separator}{delta}" if acc else delta
+        if out_key:
+            ctx.set(out_key, acc)
+        return acc
+
+    # ------------------------------------------------------------------
+    # 辅助:执行编排
     # ------------------------------------------------------------------
     def _effective_max(self) -> int:
         """返回生效的最大迭代次数。"""

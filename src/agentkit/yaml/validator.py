@@ -106,14 +106,33 @@ def validate_workflow(config: dict) -> ValidationReport:
     if not config.get("steps"):
         report.errors.append(ValidationError("[root]", "缺少必填字段 steps 或为空"))
 
-    # 2. 收集 agent 名
+    # 2a. 收集已声明的 provider 名(预设 + YAML providers 段)
+    from agentkit.llm.provider import PRESET_PROVIDERS
+
+    provider_names: set[str] = set(PRESET_PROVIDERS.keys())
+    for prov_dict in config.get("providers", []):
+        prov_name = prov_dict.get("name", "")
+        if prov_name:
+            provider_names.add(prov_name)
+
+    # 2b. 收集 agent 名 + 校验 agent.provider 引用
     agent_names = set()
     for agent_dict in config.get("agents", []):
         name = agent_dict.get("name", "")
         if name:
             agent_names.add(name)
+        # 校验 provider 引用
+        prov_ref = agent_dict.get("provider")
+        if prov_ref and prov_ref not in provider_names:
+            report.errors.append(
+                ValidationError(
+                    f"agents[{name}]",
+                    f"agent {name!r} 的 provider {prov_ref!r} 未在 providers "
+                    f"段声明,也不是内置预设。可用: {sorted(provider_names)}",
+                )
+            )
 
-    # 2b. 收集工作流级输入名（供 from 来源检查）
+    # 2c. 收集工作流级输入名（供 from 来源检查）
     wf_inputs: set[str] = set()
     for inp in config.get("inputs", []):
         if isinstance(inp, str):
@@ -124,7 +143,9 @@ def validate_workflow(config: dict) -> ValidationReport:
     # 3. 校验 steps
     steps = config.get("steps", [])
     if isinstance(steps, list):
-        _validate_steps(steps, "steps", agent_names, report, wf_inputs)
+        _validate_steps(
+            steps, "steps", agent_names, report, wf_inputs, provider_names
+        )
 
     return report
 
@@ -135,15 +156,17 @@ def _validate_steps(
     agent_names: set[str],
     report: ValidationReport,
     wf_inputs: set[str] | None = None,
+    provider_names: set[str] | None = None,
 ) -> None:
     """递归校验 Step 列表。
 
     Args:
-        steps:        Step dict 列表。
-        path_prefix:  路径前缀(如 ``steps`` / ``steps[0].then``)。
-        agent_names:  已声明的 agent 名集合。
-        report:       校验报告。
-        wf_inputs:    工作流级输入名集合（供端口 from 来源检查）。
+        steps:          Step dict 列表。
+        path_prefix:    路径前缀(如 ``steps`` / ``steps[0].then``)。
+        agent_names:    已声明的 agent 名集合。
+        report:         校验报告。
+        wf_inputs:      工作流级输入名集合（供端口 from 来源检查）。
+        provider_names: 已声明的 provider 名集合（供 agent.provider 校验）。
     """
     seen_ids: set[str] = set()
     seen_outputs: set[str] = set()
@@ -196,7 +219,12 @@ def _validate_steps(
         # 3c. output 唯一性(同级)
         output = step_dict.get("output")
         if output:
-            if output in seen_outputs:
+            # append 模式的 loop 可复用前序步骤的 output 作为累加种子,合法
+            is_append_seed = (
+                step_type == "loop"
+                and step_dict.get("output_mode", "collect") == "append"
+            )
+            if output in seen_outputs and not is_append_seed:
                 report.errors.append(
                     ValidationError(path, f"同级 output key 重复: {output!r}")
                 )
@@ -272,10 +300,10 @@ def _validate_steps(
             # 递归校验 then / else
             then_steps = step_dict.get("then", [])
             if then_steps:
-                _validate_steps(then_steps, f"{path}.then", agent_names, report, prior_output_names)
+                _validate_steps(then_steps, f"{path}.then", agent_names, report, prior_output_names, provider_names)
             else_steps = step_dict.get("else", [])
             if else_steps:
-                _validate_steps(else_steps, f"{path}.else", agent_names, report, prior_output_names)
+                _validate_steps(else_steps, f"{path}.else", agent_names, report, prior_output_names, provider_names)
 
         elif step_type == "loop":
             has_iter = bool(step_dict.get("iter"))
@@ -288,10 +316,36 @@ def _validate_steps(
                 report.warnings.append(
                     ValidationError(path, "LoopStep 同时有 iter 和 until,iter 优先生效")
                 )
+            # output_mode 枚举校验
+            output_mode = step_dict.get("output_mode", "collect")
+            if output_mode not in ("collect", "append", "last"):
+                report.errors.append(
+                    ValidationError(
+                        path,
+                        f"LoopStep output_mode 必须为 collect/append/last,当前为 {output_mode!r}",
+                    )
+                )
+            # separator 类型校验
+            separator = step_dict.get("separator", "")
+            if not isinstance(separator, str):
+                report.errors.append(
+                    ValidationError(
+                        path,
+                        f"LoopStep separator 必须为字符串,当前为 {type(separator).__name__}",
+                    )
+                )
+            # append 模式需显式声明 output(累加目标)
+            if output_mode == "append" and not step_dict.get("output"):
+                report.errors.append(
+                    ValidationError(
+                        path,
+                        "LoopStep output_mode=append 需要显式声明 output(累加目标)",
+                    )
+                )
             # 递归校验 step(循环体)
             body = step_dict.get("step")
             if body and isinstance(body, dict):
-                _validate_steps([body], f"{path}.step", agent_names, report, prior_output_names)
+                _validate_steps([body], f"{path}.step", agent_names, report, prior_output_names, provider_names)
             elif not body:
                 report.errors.append(
                     ValidationError(path, "LoopStep 缺少 step(循环体)")
@@ -304,7 +358,7 @@ def _validate_steps(
                     ValidationError(path, "ParallelStep 缺少 branches")
                 )
             else:
-                _validate_steps(branches, f"{path}.branches", agent_names, report, prior_output_names)
+                _validate_steps(branches, f"{path}.branches", agent_names, report, prior_output_names, provider_names)
             # output 唯一性(branches 内)：含 output 字段和 outputs 端口名
             branch_out_keys: list[str] = []
             for b in branches:

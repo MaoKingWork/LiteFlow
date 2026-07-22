@@ -47,6 +47,7 @@ from agentkit.llm.provider import (
     get_provider,
     list_providers,
     resolve_provider,
+    resolve_provider_by_model,
     create_client,
     PRESET_PROVIDERS,
 )
@@ -84,12 +85,16 @@ __all__ = [
     "get_provider",
     "list_providers",
     "resolve_provider",
+    "resolve_provider_by_model",
     "create_client",
     "PRESET_PROVIDERS",
     # 默认客户端机制(向后兼容)
     "set_default_client",
     "get_default_client",
     "clear_default_client",
+    # 提供商客户端缓存(按提供商名复用客户端)
+    "get_client_for_provider",
+    "clear_provider_client_cache",
     # 多模态 content part 构造助手(详见 agentkit.llm.media)
     "media_text",
     "image_url",
@@ -145,3 +150,37 @@ def clear_default_client() -> None:
     """清除全局默认客户端(等价于 set_default_client(None))。"""
     global _DEFAULT_CLIENT
     _DEFAULT_CLIENT = None
+
+
+# ---------------------------------------------------------------------------
+# 提供商客户端缓存 —— 按提供商名复用客户端实例
+# ---------------------------------------------------------------------------
+# 当 LLMStep 按 agent.provider / agent.model 路由到非默认提供商时,用此缓存
+# 避免每次 run() 都重建客户端(httpx 连接池等)。按提供商名键控,同一提供商
+# 复用同一客户端。测试可用 clear_provider_client_cache 清除。
+_PROVIDER_CLIENT_CACHE: dict[str, LLMClient] = {}
+
+
+def get_client_for_provider(name: str) -> LLMClient:
+    """按提供商名获取(惰性创建并缓存的)LLM 客户端。
+
+    首次调用时通过 ``create_client(name)`` 创建并缓存;后续同名调用直接
+    返回缓存实例,避免重复创建 httpx 连接池。
+
+    Args:
+        name: 提供商名(预设或自定义注册名)。
+
+    Returns:
+        LLMClient: 对应提供商的客户端实例。
+
+    Raises:
+        KeyError / ImportError: 提供商未注册或可选依赖未安装(由 create_client 传播)。
+    """
+    if name not in _PROVIDER_CLIENT_CACHE:
+        _PROVIDER_CLIENT_CACHE[name] = create_client(name)
+    return _PROVIDER_CLIENT_CACHE[name]
+
+
+def clear_provider_client_cache() -> None:
+    """清除提供商客户端缓存(测试用)。"""
+    _PROVIDER_CLIENT_CACHE.clear()

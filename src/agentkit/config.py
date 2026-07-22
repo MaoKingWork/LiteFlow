@@ -61,7 +61,8 @@ _DEFAULTS: dict[str, Any] = {
     # Context 快照中大对象摘要的最大字符长度。被 core.context 快照逻辑使用。
     "context_snapshot_big_object_summary_len": 200,
     # LLM 单次请求默认超时秒数。被 llm.base / llm.openai 客户端使用。
-    "llm_request_timeout_seconds": 120.0,
+    # 流式场景下可适当调低(有实时输出即视为存活);非流式场景需覆盖完整生成时间。
+    "llm_request_timeout_seconds": 180.0,
     # 默认 LLM 提供商名。被 llm.provider.resolve_provider 使用,当未显式指定
     # 提供商时用此值。预设值:"deepseek" / "deepseek-flash"。
     "default_llm_provider": "deepseek",

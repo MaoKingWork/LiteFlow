@@ -8,7 +8,10 @@
     - ``PRESET_PROVIDERS``:内置预设注册表,DeepSeek 为首个预设。
     - ``LLMProvider``:不可变配置对象(frozen dataclass),描述一个提供商。
     - ``ProviderRegistry``:全局注册表,支持运行时动态注册自定义提供商。
-    - ``resolve_provider``:按名解析提供商(预设优先,自定义次之)。
+    - ``resolve_provider``:按名解析提供商(预设优先,自定义次之);无 name
+      但有 model 时,通过 ``resolve_provider_by_model`` 反查提供商。
+    - ``resolve_provider_by_model``:按模型名反查提供商名,用于 ``agent.model``
+      未指定 ``provider`` 时的自动路由;多提供商同模型名时返回 None(歧义)。
     - ``create_client``:根据提供商创建对应 LLMClient 实例。
     - DeepSeek 特有特性(thinking 模式 / JSON Output / reasoning_effort)
       由 ``DeepSeekOptions`` 承载,在创建 ``DeepSeekClient`` 时传入。
@@ -25,7 +28,8 @@
     - register_provider:  注册自定义提供商
     - get_provider:       按名获取提供商
     - list_providers:     列出所有提供商名
-    - resolve_provider:   解析提供商(名 → 配置)
+    - resolve_provider:   解析提供商(名 / model → 配置)
+    - resolve_provider_by_model: 按模型名反查提供商名
     - create_client:      根据提供商创建客户端
     - PRESET_PROVIDERS:   内置预设 dict
 """
@@ -49,6 +53,7 @@ __all__ = [
     "get_provider",
     "list_providers",
     "resolve_provider",
+    "resolve_provider_by_model",
     "create_client",
     "PRESET_PROVIDERS",
 ]
@@ -267,6 +272,30 @@ def list_providers() -> list[str]:
     return _GLOBAL_PROVIDER_REGISTRY.list()
 
 
+def resolve_provider_by_model(model: str) -> str | None:
+    """按模型名反查已注册的提供商名。
+
+    扫描全局注册表,查找 ``provider.model == model`` 的提供商。
+    用于 ``agent.model`` 未指定 ``provider`` 时的自动路由。
+
+    冲突处理:当多个提供商注册了相同的 model 时返回 ``None`` (歧义),
+    调用方应要求显式指定 ``provider`` 以消除歧义。
+
+    Args:
+        model: 模型名(如 ``"mimo-v2.5"`` / ``"deepseek-v4-pro"``)。
+
+    Returns:
+        str | None: 唯一匹配的提供商名;无匹配或多匹配时返回 None。
+    """
+    matches = [
+        name for name, prov in _GLOBAL_PROVIDER_REGISTRY._providers.items()
+        if prov.model == model
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
 def resolve_provider(
     name: str | None = None,
     *,
@@ -278,14 +307,16 @@ def resolve_provider(
 
     优先级:
         1. ``name`` 非空:从注册表取预设,再用显式参数覆盖。
-        2. ``name`` 为空但 ``base_url`` 非空:构造临时自定义提供商。
-        3. 均为空:返回全局默认提供商(读 config ``default_llm_provider``)。
+        2. ``name`` 为空但 ``model`` 非空:按模型名反查提供商
+           (``resolve_provider_by_model``),命中则用之;歧义或未命中则继续。
+        3. ``name`` 为空但 ``base_url`` 非空:构造临时自定义提供商。
+        4. 均为空:返回全局默认提供商(读 config ``default_llm_provider``)。
 
     Args:
         name:     提供商名(预设或自定义注册名)。
         base_url: 覆盖 base_url。
         api_key:  覆盖 api_key。
-        model:    覆盖默认模型。
+        model:    覆盖默认模型;``name`` 为空时也用于反查提供商。
 
     Returns:
         LLMProvider: 解析后的提供商配置。
@@ -307,7 +338,21 @@ def resolve_provider(
             provider = _dc.replace(provider, **overrides)
         return provider
 
-    # 2. 有 base_url 但无 name:构造临时提供商
+    # 2. 有 model 但无 name:按模型名反查提供商
+    if model:
+        matched_name = resolve_provider_by_model(model)
+        if matched_name:
+            provider = _GLOBAL_PROVIDER_REGISTRY.get(matched_name)
+            overrides: dict[str, Any] = {}
+            if base_url is not None:
+                overrides["base_url"] = base_url
+            if api_key is not None:
+                overrides["api_key"] = api_key
+            if overrides:
+                provider = _dc.replace(provider, **overrides)
+            return provider
+
+    # 3. 有 base_url 但无 name:构造临时提供商
     if base_url:
         return LLMProvider(
             name="custom",
@@ -317,7 +362,7 @@ def resolve_provider(
             provider_type="openai",
         )
 
-    # 3. 均为空:用全局默认提供商名
+    # 4. 均为空:用全局默认提供商名
     from agentkit.config import get_default
 
     default_name = str(get_default("default_llm_provider"))
