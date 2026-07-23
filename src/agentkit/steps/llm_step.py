@@ -238,8 +238,8 @@ class LLMStep(BaseStep):
         # 4. 构建工具 schema
         tools_schema = self._build_tools_schema(agent)
 
-        # 5. 取 LLM 客户端
-        client = self._get_client()
+        # 5. 取 LLM 客户端(按 provider/model 路由)
+        client = self._get_client(agent)
 
         # 6. Function Call 循环
         content = await self._run_function_call_loop(
@@ -414,25 +414,53 @@ class LLMStep(BaseStep):
     # ------------------------------------------------------------------
     # LLM 客户端获取
     # ------------------------------------------------------------------
-    def _get_client(self) -> LLMClient:
-        """返回生效的 LLM 客户端。
+    def _get_client(self, agent: AgentConfig) -> LLMClient:
+        """返回生效的 LLM 客户端(按 provider/model 路由)。
 
-        优先用注入的 ``self.llm_client``;为 None 时回落到全局默认客户端
-        (``agentkit.llm.get_default_client()``);均无则抛 ``RuntimeError``。
+        路由优先级:
+            1. 注入的 ``self.llm_client`` (测试 / 显式注入)。
+            2. ``agent.provider`` 显式指定:用 ``get_client_for_provider`` 创建
+               并缓存客户端。
+            3. ``agent.model`` 自动反查:通过 ``resolve_provider_by_model`` 查找
+               唯一匹配的提供商;命中则用之,歧义(多提供商同模型名)则跳过。
+            4. 全局默认客户端(``get_default_client()``)。
 
-        ``get_default_client`` 延迟导入,避免模块加载期触发 ``llm.openai``
-        的 httpx 依赖。
+        Args:
+            agent: 已解析的 Agent 配置(取 provider / model)。
+
+        Returns:
+            LLMClient: 生效的客户端实例。
+
+        Raises:
+            RuntimeError: 所有路由路径均无可用客户端。
         """
+        # 1. 注入优先
         if self.llm_client is not None:
             return self.llm_client
-        # 延迟导入:仅在需要默认客户端时才引入 llm 包(及其 openai/httpx 依赖)
-        from agentkit.llm import get_default_client
 
+        # 延迟导入:仅在需要客户端时才引入 llm 包(及其 openai/httpx 依赖)
+        from agentkit.llm import (
+            get_default_client,
+            get_client_for_provider,
+        )
+        from agentkit.llm.provider import resolve_provider_by_model
+
+        # 2. 显式 provider
+        if agent.provider:
+            return get_client_for_provider(agent.provider)
+
+        # 3. 按模型名自动反查提供商
+        matched = resolve_provider_by_model(agent.model)
+        if matched:
+            return get_client_for_provider(matched)
+
+        # 4. 全局默认
         client = get_default_client()
         if client is None:
             raise RuntimeError(
                 f"LLMStep {self.id!r} 未配置 LLM 客户端:既未注入 llm_client,"
-                f"也未通过 agentkit.llm.set_default_client 注册默认客户端。"
+                f"agent.provider 未指定,模型 {agent.model!r} 也未匹配到已注册"
+                f"提供商,且未通过 set_default_client 注册默认客户端。"
             )
         return client
 

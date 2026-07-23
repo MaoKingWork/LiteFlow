@@ -101,8 +101,19 @@ def _cmd_dry_run(args: argparse.Namespace) -> int:
 
 def _cmd_run(args: argparse.Namespace) -> int:
     """运行工作流。"""
+    import logging
+
     from agentkit.core.trace_summary import TraceSummary
     from agentkit.yaml.loader import load_workflow
+
+    # --verbose: 开启 DEBUG 级别日志(httpx 请求 / MCP 细节 / 内部 debug)
+    # 默认(default_hooks_enabled=True)已装配 LoggingHooks 输出 INFO 级摘要,
+    # --verbose 在此基础上叠加标准库 logging DEBUG,便于排查网络/协议问题。
+    if getattr(args, "verbose", False):
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        )
 
     # 可观测性 hooks(LoggingHooks + TokenAccountingHooks)由 Workflow 的
     # auto_hooks 自动装配,无需 --verbose 即可输出日志与 token 计量。
@@ -129,7 +140,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
         # 打印上下文输出
         print("\n输出:")
-        for key in sorted(result.context._data.keys()):
+        for key in sorted(result.context.keys()):
             value = result.context.get(key)
             value_str = json.dumps(value, ensure_ascii=False, default=str)
             if len(value_str) > 200:

@@ -10,6 +10,7 @@
     - FileListTool  (name="file.list",    role="source")
     - WeComSink     (name="sink.wecom",   role="sink")
     - WebhookSink   (name="sink.webhook", role="sink")
+    - MDConvertTool (name="md.convert",   role="sink")
 """
 
 # 导入各工具模块,触发 @tool 装饰器注册到全局 ToolRegistry
@@ -17,6 +18,7 @@ from agentkit.tools.base import Tool, register, get_tool, list_tools
 from agentkit.tools.db import DBQueryTool
 from agentkit.tools.file import FileListTool, FileReadTool, FileWriteTool
 from agentkit.tools.http import HTTPTool
+from agentkit.tools.md_convert import MDConvertTool
 from agentkit.tools.sinks import WeComSink, WebhookSink
 from agentkit.tools.time import TimeNowTool
 
@@ -33,4 +35,5 @@ __all__ = [
     "FileListTool",
     "WeComSink",
     "WebhookSink",
+    "MDConvertTool",
 ]

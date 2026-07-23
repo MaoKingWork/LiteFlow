@@ -354,6 +354,8 @@ def _compile_step(
             max=step_dict.get("max"),
             on_max=step_dict.get("on_max", "fail"),
             output=output,
+            output_mode=step_dict.get("output_mode", "collect"),
+            separator=step_dict.get("separator", ""),
             retry=retry,
             timeout=timeout,
         )
@@ -407,6 +409,7 @@ def _compile_agents(agents_list: list[dict]) -> dict[str, AgentConfig]:
         configs[name] = AgentConfig(
             name=name,
             model=agent_dict.get("model", "gpt-4o-mini"),
+            provider=agent_dict.get("provider"),
             system=agent_dict.get("system", ""),
             output_model=output_model,
             temperature=float(agent_dict.get("temperature", 0.2)),
