@@ -325,6 +325,21 @@ class Workflow:
                 checkpoint.updated_at = time.time()
                 await self.checkpoint_store.save(checkpoint)
 
+            # graceful 取消:所有 step 完成后再次检查令牌
+            # (令牌可能在最后一个 step 执行期间被触发,此时无后续 step
+            # 边界能捕获,需在此显式检查,避免误标 completed)
+            if cancel_token is not None and cancel_token.is_cancelled:
+                checkpoint.status = RunStatus.CANCELLED
+                checkpoint.context_snapshot = ctx.snapshot()
+                checkpoint.updated_at = time.time()
+                await self.checkpoint_store.save(checkpoint)
+                return WorkflowResult(
+                    run_id=run_id,
+                    context=ctx,
+                    status=RunStatus.CANCELLED,
+                    completed_steps=list(checkpoint.completed_steps),
+                )
+
             # 全部完成
             checkpoint.status = RunStatus.COMPLETED
             checkpoint.error = None

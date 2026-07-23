@@ -77,6 +77,30 @@ _DEFAULTS: dict[str, Any] = {
     # BlockingExecutor 进程池大小。被 runtime.blocking 使用;
     # 工具标记 execution="process" 时经 ProcessPoolExecutor 卸载(P0 未实现)。
     "executor_max_processes": 2,
+
+    # ==================== Server（P1 新增）====================
+    # Server 绑定地址。默认 127.0.0.1 仅本地；--host 0.0.0.0 才对外。
+    # 被 server.app 使用。
+    "server_host": "127.0.0.1",
+    # Server 端口。被 server.app 使用。
+    "server_port": 8000,
+    # Server 鉴权 bearer token；空字符串=仅本地可访问（仍允许 127.0.0.1）。
+    # 也可通过 env AGENTKIT_SERVER_TOKEN 设置。被 server.security 使用。
+    "server_token": "",
+    # CORS 允许的 origin 列表；空列表=关闭 CORS。被 server.security 使用。
+    "server_cors_origins": [],
+    # EventBus per-subscriber 队列容量。被 runtime.event 使用。
+    "server_event_queue_size": 1000,
+    # 单 run 事件日志最大事件数；超限拒绝并记事件。被 server.routes.runs 使用。
+    "server_event_log_max_events": 100000,
+    # 单 artifact 最大字节（100MB）。被 runtime.artifact 使用。
+    "server_artifact_max_size": 100 * 1024 * 1024,
+    # 单 run 产物总量最大字节（1GB）。被 runtime.artifact 使用。
+    "server_artifact_max_total": 1024 * 1024 * 1024,
+    # GCSweeper 定时扫描间隔（秒，6h）。被 server.app lifespan 使用。
+    "server_gc_interval_seconds": 6 * 3600,
+    # GCSweeper 孤儿文件宽限期（秒，24h）。被 runtime.artifact 使用。
+    "server_gc_orphan_grace_seconds": 24 * 3600,
 }
 
 

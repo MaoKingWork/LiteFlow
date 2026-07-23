@@ -1,12 +1,17 @@
-"""ReportEngineTool：execution='thread' 标记 + BlockingExecutor 集成。
+"""ReportEngineTool：execution='thread' 标记 + BlockingExecutor 集成 + ArtifactStore 联动。
 
-出口标准（对齐 §5.5）：
+出口标准（对齐 §5.5 / §5.6）：
     - ReportEngineTool.execution == "thread"
     - 经 BlockingExecutor 卸载到子线程，render 不阻塞主事件循环
     - evaluate 失败 → 返回 {"error": ...}（不抛异常）
     - render 失败 → 返回 {"error": ...}
     - 成功 → 返回 {"file_uri": ..., "preview": ...}
+    - 注入 ArtifactStore 时 → 额外返回 {"artifact": {...}}，并触发 ARTIFACT_PRODUCED 事件
     - 经 ToolStep / LLMStep Function Call 路径调用都生效
+
+适配器实现位于 ``report_engine_sdk/adapters/agentkit.py``（一等适配器，
+与 langchain / mcp / api 三个并列）。本测试用 Mock 替代真实 ReportEngine，
+真实 SDK 联通的端到端测试见 ``test_report_engine_e2e.py``。
 """
 from __future__ import annotations
 
@@ -18,13 +23,18 @@ from typing import Optional
 import pytest
 
 from agentkit.core.context import Context
+from agentkit.runtime.artifact import ArtifactStore
 from agentkit.runtime.blocking import (
     BlockingExecutor,
     get_blocking_executor,
     set_blocking_executor,
 )
+from agentkit.runtime.event import EventBus, EventLog, EventType
 from agentkit.tools.base import Tool, register
-from agentkit.tools.report_engine import ReportEngineTool
+from report_engine_sdk.adapters.agentkit import (
+    ReportEngineTool,
+    create_report_tool,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +358,6 @@ async def test_report_engine_tool_no_event_bus_works():
 # ---------------------------------------------------------------------------
 async def test_create_report_tool_factory_registers():
     """create_report_tool 工厂创建并注册工具。"""
-    from agentkit.tools.report_engine import create_report_tool
     from agentkit.tools.base import get_tool
 
     engine = _MockReportEngine()
@@ -363,6 +372,98 @@ async def test_create_report_tool_factory_registers():
     assert tool.name == "report.factory_test"
     # 注册后可获取
     assert get_tool("report.factory_test") is tool
+
+
+# ---------------------------------------------------------------------------
+# ArtifactStore 联动：注入后成功渲染时落盘 + 发 ARTIFACT_PRODUCED 事件
+# ---------------------------------------------------------------------------
+async def test_report_engine_tool_artifact_store_integration(tmp_path):
+    """注入 ArtifactStore 时，工具结果含 artifact 字段，并发出 ARTIFACT_PRODUCED 事件。"""
+    run_id = "test_run_artifact"
+    log = EventLog(run_id, base_dir=str(tmp_path))
+    bus = EventBus(run_id, log=log)
+    store = ArtifactStore(run_id, event_bus=bus, base_dir=str(tmp_path))
+
+    engine = _MockReportEngine()
+    tool = ReportEngineTool(engine, artifact_store=store)  # type: ignore[arg-type]
+
+    sub = await bus.subscribe()
+    result = await tool.call(
+        {"report_id": "pack:report", "data": {"x": 1}, "view": "summary"},
+        Context(),
+    )
+
+    # 工具结果包含 artifact 字段
+    assert "error" not in result
+    assert "artifact" in result
+    art = result["artifact"]
+    assert art["step_id"] == "report.generate"
+    assert art["content_type"] == "text/markdown"
+    assert art["run_id"] == run_id
+    assert art["size"] > 0
+    assert art["md5"]
+
+    # 事件总线收到 ARTIFACT_PRODUCED 事件
+    event = await asyncio.wait_for(sub.get(), timeout=1.0)
+    assert event is not None
+    assert event.type == EventType.ARTIFACT_PRODUCED
+    assert event.payload["id"] == art["id"]
+    assert event.payload["uri"] == art["uri"]
+
+    await bus.close()
+
+
+async def test_report_engine_tool_artifact_store_failure_does_not_block(tmp_path):
+    """ArtifactStore 落盘失败时不阻断工具成功返回，通过 artifact_error 字段可见。"""
+    run_id = "test_run_artifact_fail"
+    # max_size=1 强制 size > max_size 触发 ArtifactQuotaError
+    bus = EventBus(run_id)  # 不持久化，简化测试
+    store = ArtifactStore(run_id, event_bus=bus, base_dir=str(tmp_path), max_size=1)
+
+    engine = _MockReportEngine()
+    tool = ReportEngineTool(engine, artifact_store=store)  # type: ignore[arg-type]
+
+    result = await tool.call(
+        {"report_id": "pack:report", "data": {}, "view": "v"},
+        Context(),
+    )
+
+    # 主流程仍成功
+    assert "error" not in result
+    assert result["file_uri"] == "file:///tmp/pack:report_v.md"
+    # 但 artifact 字段缺失，artifact_error 可见
+    assert "artifact" not in result
+    assert "artifact_error" in result
+    assert "ArtifactQuotaError" in result["artifact_error"]
+
+    await bus.close()
+
+
+async def test_report_engine_tool_custom_artifact_step_id(tmp_path):
+    """artifact_step_id 自定义后反映在产物目录与事件 payload 中。"""
+    run_id = "test_run_custom_step"
+    log = EventLog(run_id, base_dir=str(tmp_path))
+    bus = EventBus(run_id, log=log)
+    store = ArtifactStore(run_id, event_bus=bus, base_dir=str(tmp_path))
+
+    engine = _MockReportEngine()
+    tool = ReportEngineTool(
+        engine,  # type: ignore[arg-type]
+        artifact_store=store,
+        artifact_step_id="gen_report_step",
+        content_type="text/plain",
+    )
+
+    result = await tool.call(
+        {"report_id": "p:r", "data": {}, "view": "v"},
+        Context(),
+    )
+
+    assert "artifact" in result
+    assert result["artifact"]["step_id"] == "gen_report_step"
+    assert result["artifact"]["content_type"] == "text/plain"
+
+    await bus.close()
 
 
 # ---------------------------------------------------------------------------

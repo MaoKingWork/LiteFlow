@@ -473,3 +473,85 @@ async def test_event_bus_hooks_with_failing_workflow(tmp_path):
     # run_failed 事件带 error
     failed_ev = next(e for e in events if e.type == EventType.RUN_FAILED)
     assert "故意失败" in failed_ev.payload["error"] or "RuntimeError" in failed_ev.payload["error"]
+
+
+# ---------------------------------------------------------------------------
+# A1: mark_cancelling —— after_workflow 守卫
+# ---------------------------------------------------------------------------
+async def test_mark_cancelling_defaults_false(tmp_path):
+    """未调用 mark_cancelling 时 _workflow_cancelling 为 False。"""
+    log = EventLog("run_c1", base_dir=str(tmp_path))
+    bus = EventBus("run_c1", log=log)
+    hooks = EventBusHooks(bus, run_id="run_c1")
+    assert hooks._workflow_cancelling is False
+
+
+async def test_mark_cancelling_sets_flag(tmp_path):
+    """mark_cancelling() 设置 _workflow_cancelling = True。"""
+    log = EventLog("run_c2", base_dir=str(tmp_path))
+    bus = EventBus("run_c2", log=log)
+    hooks = EventBusHooks(bus, run_id="run_c2")
+    hooks.mark_cancelling()
+    assert hooks._workflow_cancelling is True
+
+
+async def test_cancelled_skips_after_workflow(tmp_path):
+    """mark_cancelling() 后 after_workflow 不发任何事件。"""
+    log = EventLog("run_c3", base_dir=str(tmp_path))
+    bus = EventBus("run_c3", log=log)
+    hooks = EventBusHooks(bus, run_id="run_c3")
+
+    hooks.mark_cancelling()
+    from agentkit.core.context import Context
+    await hooks.after_workflow(_MockWorkflow(), Context(), Context())
+
+    events = list(log.read_from())
+    assert len(events) == 0
+
+
+async def test_cancelled_skips_after_workflow_even_if_failed(tmp_path):
+    """mark_cancelling() 后即使 _workflow_failed=True 也不发 run_failed。"""
+    log = EventLog("run_c4", base_dir=str(tmp_path))
+    bus = EventBus("run_c4", log=log)
+    hooks = EventBusHooks(bus, run_id="run_c4")
+
+    from agentkit.core.context import Context
+    # 先触发 on_step_error 设置 _workflow_failed
+    await hooks.on_step_error(_MockStep(), Context(), RuntimeError("boom"))
+    assert hooks._workflow_failed is True
+
+    # mark_cancelling 后 after_workflow 仍跳过
+    hooks.mark_cancelling()
+    await hooks.after_workflow(_MockWorkflow(), Context(), Context())
+
+    events = list(log.read_from())
+    assert len(events) == 0
+
+
+async def test_normal_completed_unchanged_after_mark_cancelling_api(tmp_path):
+    """未 mark_cancelling 时 after_workflow 照发 run_completed（回归保护）。"""
+    log = EventLog("run_c5", base_dir=str(tmp_path))
+    bus = EventBus("run_c5", log=log)
+    hooks = EventBusHooks(bus, run_id="run_c5")
+
+    from agentkit.core.context import Context
+    await hooks.after_workflow(_MockWorkflow(), Context(), Context())
+
+    events = list(log.read_from())
+    assert len(events) == 1
+    assert events[0].type == EventType.RUN_COMPLETED
+
+
+async def test_failed_unchanged_without_mark_cancelling(tmp_path):
+    """未 mark_cancelling 且 _workflow_failed=True 时照发 run_failed。"""
+    log = EventLog("run_c6", base_dir=str(tmp_path))
+    bus = EventBus("run_c6", log=log)
+    hooks = EventBusHooks(bus, run_id="run_c6")
+
+    from agentkit.core.context import Context
+    await hooks.on_step_error(_MockStep(), Context(), RuntimeError("err"))
+    await hooks.after_workflow(_MockWorkflow(), Context(), Context())
+
+    events = list(log.read_from())
+    assert len(events) == 1
+    assert events[0].type == EventType.RUN_FAILED

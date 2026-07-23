@@ -46,15 +46,22 @@ class ValidationError:
     """单个校验错误。
 
     Attributes:
-        path:    错误所在路径(如 ``steps[2]`` / ``steps[0].then[1]``)。
-        message: 错误描述。
+        path:      错误所在路径(如 ``steps[2]`` / ``steps[0].then[1]``)。
+        message:   错误描述。
+        severity:  严重级别,``error``(默认,阻止执行)或 ``warning``(仅提示)。
+        code:      机器可读错误码(如 ``step.type_unknown``),空字符串表示无码。
+                   命名规范 ``<类别>.<具体>``,供前端按 code 分组展示或国际化。
     """
 
     path: str
     message: str
+    severity: str = "error"
+    code: str = ""
 
     def __str__(self) -> str:
-        return f"[{self.path}] {self.message}"
+        prefix = "错误" if self.severity == "error" else "警告"
+        code_str = f" [{self.code}]" if self.code else ""
+        return f"{prefix} [{self.path}]{code_str} {self.message}"
 
 
 @dataclass
@@ -62,7 +69,7 @@ class ValidationReport:
     """校验报告。
 
     Attributes:
-        errors:   错误列表。
+        errors:   错误列表(阻止执行)。
         warnings: 警告列表(不阻止执行)。
     """
 
@@ -73,6 +80,34 @@ class ValidationReport:
     def is_valid(self) -> bool:
         """是否通过校验(无错误)。"""
         return len(self.errors) == 0
+
+    @property
+    def diagnostics(self) -> list[ValidationError]:
+        """所有诊断项(errors 在前,warnings 在后)。
+
+        供前端统一渲染:每条自带 ``severity`` 字段,无需分别处理 errors/warnings。
+        """
+        return list(self.errors) + list(self.warnings)
+
+    def to_api_response(self) -> dict:
+        """序列化为 API 响应格式。
+
+        Returns:
+            dict: ``{"is_valid": bool, "diagnostics": [...]}``,
+            每条 diagnostic 含 ``path`` / ``message`` / ``severity`` / ``code``。
+        """
+        return {
+            "is_valid": self.is_valid,
+            "diagnostics": [
+                {
+                    "path": d.path,
+                    "message": d.message,
+                    "severity": d.severity,
+                    "code": d.code,
+                }
+                for d in self.diagnostics
+            ],
+        }
 
     def __str__(self) -> str:
         lines: list[str] = []
@@ -102,9 +137,15 @@ def validate_workflow(config: dict) -> ValidationReport:
 
     # 1. 顶层必填字段
     if not config.get("name"):
-        report.errors.append(ValidationError("[root]", "缺少必填字段 name"))
+        report.errors.append(
+            ValidationError("[root]", "缺少必填字段 name", code="root.name_missing")
+        )
     if not config.get("steps"):
-        report.errors.append(ValidationError("[root]", "缺少必填字段 steps 或为空"))
+        report.errors.append(
+            ValidationError(
+                "[root]", "缺少必填字段 steps 或为空", code="root.steps_missing"
+            )
+        )
 
     # 2a. 收集已声明的 provider 名(预设 + YAML providers 段)
     from agentkit.llm.provider import PRESET_PROVIDERS
@@ -129,6 +170,7 @@ def validate_workflow(config: dict) -> ValidationReport:
                     f"agents[{name}]",
                     f"agent {name!r} 的 provider {prov_ref!r} 未在 providers "
                     f"段声明,也不是内置预设。可用: {sorted(provider_names)}",
+                    code="agent.provider_unknown",
                 )
             )
 
@@ -184,6 +226,7 @@ def _validate_steps(
                 ValidationError(
                     f"{path_prefix}[{i}]",
                     "Step 定义应为 dict",
+                    code="step.not_dict",
                 )
             )
             continue
@@ -195,7 +238,7 @@ def _validate_steps(
         # 3a. type 必填且已注册
         if not step_type:
             report.errors.append(
-                ValidationError(path, "缺少 type 字段")
+                ValidationError(path, "缺少 type 字段", code="step.type_missing")
             )
             continue
         if step_type not in registered_types:
@@ -204,6 +247,7 @@ def _validate_steps(
                     path,
                     f"未注册的 Step type: {step_type!r}。"
                     f"已注册: {sorted(registered_types)}",
+                    code="step.type_unknown",
                 )
             )
 
@@ -211,7 +255,11 @@ def _validate_steps(
         if step_id:
             if step_id in seen_ids:
                 report.errors.append(
-                    ValidationError(path, f"重复的 Step id: {step_id!r}")
+                    ValidationError(
+                        path,
+                        f"重复的 Step id: {step_id!r}",
+                        code="step.id_duplicate",
+                    )
                 )
             else:
                 seen_ids.add(step_id)
@@ -226,7 +274,11 @@ def _validate_steps(
             )
             if output in seen_outputs and not is_append_seed:
                 report.errors.append(
-                    ValidationError(path, f"同级 output key 重复: {output!r}")
+                    ValidationError(
+                        path,
+                        f"同级 output key 重复: {output!r}",
+                        code="step.output_duplicate",
+                    )
                 )
             else:
                 seen_outputs.add(output)
@@ -244,6 +296,7 @@ def _validate_steps(
                         ValidationError(
                             path,
                             f"agent 引用 {agent_ref!r} 未在 agents 段声明",
+                            code="llm.agent_unknown",
                         )
                     )
             # output_format 取值合法性
@@ -254,6 +307,7 @@ def _validate_steps(
                         path,
                         f"output_format 必须为 'text' 或 'json',"
                         f"当前: {output_format!r}",
+                        code="llm.output_format_invalid",
                     )
                 )
             # stream 必须为 bool
@@ -263,6 +317,7 @@ def _validate_steps(
                     ValidationError(
                         path,
                         f"stream 必须为布尔值(true/false),当前: {stream!r}",
+                        code="llm.stream_invalid",
                     )
                 )
             _check_deprecated_prompt_field(step_dict, path, report)
@@ -276,6 +331,8 @@ def _validate_steps(
                             path,
                             f"tool 引用 {tool_name!r} 未在 ToolRegistry 中注册"
                             f"(可能是 MCP 动态注册的)",
+                            severity="warning",
+                            code="tool.unknown",
                         )
                     )
 
@@ -288,6 +345,8 @@ def _validate_steps(
                             path,
                             f"skill 引用 {skill_name!r} 未在 SkillRegistry 中注册"
                             f"(可能是运行时加载的)",
+                            severity="warning",
+                            code="skill.unknown",
                         )
                     )
             _check_deprecated_prompt_field(step_dict, path, report)
@@ -295,7 +354,11 @@ def _validate_steps(
         elif step_type == "condition":
             if not step_dict.get("when"):
                 report.errors.append(
-                    ValidationError(path, "ConditionStep 缺少 when 字段")
+                    ValidationError(
+                        path,
+                        "ConditionStep 缺少 when 字段",
+                        code="condition.when_missing",
+                    )
                 )
             # 递归校验 then / else
             then_steps = step_dict.get("then", [])
@@ -310,11 +373,20 @@ def _validate_steps(
             has_until = bool(step_dict.get("until"))
             if not has_iter and not has_until:
                 report.errors.append(
-                    ValidationError(path, "LoopStep 必须有 iter 或 until 之一")
+                    ValidationError(
+                        path,
+                        "LoopStep 必须有 iter 或 until 之一",
+                        code="loop.iter_until_missing",
+                    )
                 )
             if has_iter and has_until:
                 report.warnings.append(
-                    ValidationError(path, "LoopStep 同时有 iter 和 until,iter 优先生效")
+                    ValidationError(
+                        path,
+                        "LoopStep 同时有 iter 和 until,iter 优先生效",
+                        severity="warning",
+                        code="loop.iter_until_conflict",
+                    )
                 )
             # output_mode 枚举校验
             output_mode = step_dict.get("output_mode", "collect")
@@ -323,6 +395,7 @@ def _validate_steps(
                     ValidationError(
                         path,
                         f"LoopStep output_mode 必须为 collect/append/last,当前为 {output_mode!r}",
+                        code="loop.output_mode_invalid",
                     )
                 )
             # separator 类型校验
@@ -332,6 +405,7 @@ def _validate_steps(
                     ValidationError(
                         path,
                         f"LoopStep separator 必须为字符串,当前为 {type(separator).__name__}",
+                        code="loop.separator_invalid",
                     )
                 )
             # append 模式需显式声明 output(累加目标)
@@ -340,6 +414,7 @@ def _validate_steps(
                     ValidationError(
                         path,
                         "LoopStep output_mode=append 需要显式声明 output(累加目标)",
+                        code="loop.append_output_missing",
                     )
                 )
             # 递归校验 step(循环体)
@@ -348,14 +423,22 @@ def _validate_steps(
                 _validate_steps([body], f"{path}.step", agent_names, report, prior_output_names, provider_names)
             elif not body:
                 report.errors.append(
-                    ValidationError(path, "LoopStep 缺少 step(循环体)")
+                    ValidationError(
+                        path,
+                        "LoopStep 缺少 step(循环体)",
+                        code="loop.body_missing",
+                    )
                 )
 
         elif step_type == "parallel":
             branches = step_dict.get("branches", [])
             if not branches:
                 report.errors.append(
-                    ValidationError(path, "ParallelStep 缺少 branches")
+                    ValidationError(
+                        path,
+                        "ParallelStep 缺少 branches",
+                        code="parallel.branches_empty",
+                    )
                 )
             else:
                 _validate_steps(branches, f"{path}.branches", agent_names, report, prior_output_names, provider_names)
@@ -375,6 +458,7 @@ def _validate_steps(
                         path,
                         f"ParallelStep branches 的 output/outputs 端口名重复: {set(dupes)}。"
                         f"请为各分支指定不同 name",
+                        code="parallel.branch_output_duplicate",
                     )
                 )
 
@@ -408,6 +492,8 @@ def _check_deprecated_prompt_field(
             ValidationError(
                 path,
                 "同时存在 prompt 与 input,以 prompt 为准;建议移除已废弃的 input",
+                severity="warning",
+                code="prompt.input_deprecated_conflict",
             )
         )
     elif has_input:
@@ -415,6 +501,8 @@ def _check_deprecated_prompt_field(
             ValidationError(
                 path,
                 "input 字段已废弃,请改用 prompt",
+                severity="warning",
+                code="prompt.input_deprecated",
             )
         )
 
@@ -457,7 +545,11 @@ def _validate_ports(
     # output 与 outputs 互斥
     if step_dict.get("output") and step_dict.get("outputs") is not None:
         report.errors.append(
-            ValidationError(path, "output 与 outputs 不可同时声明")
+            ValidationError(
+                path,
+                "output 与 outputs 不可同时声明",
+                code="port.output_outputs_conflict",
+            )
         )
 
     inputs_spec = step_dict.get("inputs")
@@ -480,6 +572,8 @@ def _validate_ports(
                     f"输入端口 {item['name']!r} 的 from 来源 {from_key!r} "
                     f"未在已知来源(workflow inputs / 前序 outputs)中找到,"
                     f"可能是动态写入的 key",
+                    severity="warning",
+                    code="port.from_unknown",
                 )
             )
     for item in _iter_port_dicts(outputs_spec):
@@ -509,9 +603,22 @@ def _validate_ports(
             f"且不在已知来源中(幽灵依赖)"
         )
         if strict_scope:
-            report.errors.append(ValidationError(path, msg + "(strict_scope=True)"))
+            report.errors.append(
+                ValidationError(
+                    path,
+                    msg + "(strict_scope=True)",
+                    code="template.ghost_dependency",
+                )
+            )
         else:
-            report.warnings.append(ValidationError(path, msg))
+            report.warnings.append(
+                ValidationError(
+                    path,
+                    msg,
+                    severity="warning",
+                    code="template.ghost_dependency",
+                )
+            )
 
 
 def _iter_port_dicts(spec: Any):
@@ -530,7 +637,11 @@ def _check_dup_names(
     for name in names:
         if name in seen:
             report.errors.append(
-                ValidationError(path, f"{label} 端口名重复: {name!r}")
+                ValidationError(
+                    path,
+                    f"{label} 端口名重复: {name!r}",
+                    code="port.name_duplicate",
+                )
             )
         seen.add(name)
 
@@ -541,7 +652,11 @@ def _check_port_fields(
     """校验单个端口 dict 的字段约束。"""
     if "name" not in item:
         report.errors.append(
-            ValidationError(path, f"{label} 端口声明缺少 name 字段: {item!r}")
+            ValidationError(
+                path,
+                f"{label} 端口声明缺少 name 字段: {item!r}",
+                code="port.name_missing",
+            )
         )
         return
     if "type" in item and "schema" in item:
@@ -549,6 +664,7 @@ def _check_port_fields(
             ValidationError(
                 path,
                 f"{label} 端口 {item['name']!r} 的 type 与 schema 不可同时声明",
+                code="port.type_schema_conflict",
             )
         )
 

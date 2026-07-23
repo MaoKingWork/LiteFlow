@@ -108,6 +108,19 @@ class EventBusHooks(LifecycleHooks):
         # 运行级状态追踪：用于 after_workflow 判断 completed vs failed
         self._workflow_failed: bool = False
         self._workflow_error: str | None = None
+        # cancelling 标志：由 RunManager.cancel() 经 mark_cancelling() 设置。
+        # 设置后 after_workflow 跳过 run_completed/run_failed，
+        # 改由 RunManager 在 Task 收尾时显式发 run_cancelled。
+        self._workflow_cancelling: bool = False
+
+    def mark_cancelling(self) -> None:
+        """标记当前 run 进入 cancelling 状态。
+
+        由 :class:`~agentkit.runtime.run_manager.RunManager.cancel()` 在受理取消时
+        调用。调用后 :meth:`after_workflow` 跳过 ``run_completed`` / ``run_failed``
+        的发送（由 RunManager 在 Task 收尾时显式发 ``run_cancelled``）。
+        """
+        self._workflow_cancelling = True
 
     # ------------------------------------------------------------------
     # 运行级
@@ -127,7 +140,12 @@ class EventBusHooks(LifecycleHooks):
 
         依据 :attr:`_workflow_failed` 标志判断；标志由 :meth:`on_step_error`
         在 RAISE 策略时设置。``result`` 为最终 Context，此处只读其状态字段。
+
+        **cancelling 守卫**：若 :meth:`mark_cancelling` 已被调用，则跳过本方法
+        的所有事件发送——终态事件由 RunManager 显式发 ``run_cancelled``。
         """
+        if self._workflow_cancelling:
+            return
         if self._workflow_failed:
             await self._bus.publish(RunEvent(
                 run_id=self._run_id,

@@ -1,0 +1,69 @@
+# 报告生成引擎 × AgentKit 深度适配演示
+#
+# 演示能力:
+#   - ToolStep 声明式调用 report.generate(report_engine_sdk 适配器)
+#   - 端口系统(inputs/outputs)声明数据契约
+#   - {{var}} 模板解析保留原始类型(数字 / 列表不退化为字符串)
+#   - 产物经 ArtifactStore 落盘 + ARTIFACT_PRODUCED 事件(由 Python 入口注入)
+#
+# 运行方式:
+#   python examples/run_report_demo.py
+#
+# 说明:本 demo 不依赖 LLM API Key,纯 ToolStep 驱动报告生成,
+#       展示 report_engine_sdk 与 agentkit 的声明式集成。
+#       LLM Function Call 路径见 run_report_demo.py 的演示函数。
+
+name: report_demo
+
+inputs:
+  - service_name
+  - uptime_pct
+  - error_count
+  - latency_ms
+  - date_str
+
+steps:
+  # 1. 调用 report.generate 生成运维健康检查报告
+  #    tool: report.generate 由 Python 入口注册的 ReportEngineTool 提供
+  #    execution="thread" 标记使 render 链经 BlockingExecutor 卸载到子线程
+  - id: gen_health_report
+    type: tool
+    tool: report.generate
+    params:
+      report_id: "ops_report:health_check"
+      data:
+        service_name: "{{service_name}}"
+        uptime_pct: "{{uptime_pct}}"
+        error_count: "{{error_count}}"
+        latency_ms: "{{latency_ms}}"
+        date_str: "{{date_str}}"
+      view: "default"
+    output: health_report
+    # 输入端口声明:显式数据契约,展示框架端口系统适配
+    inputs:
+      - name: service_name
+        type: str
+      - name: uptime_pct
+        type: float
+      - name: error_count
+        type: int
+      - name: latency_ms
+        type: float
+      - name: date_str
+        type: str
+
+  # 2. 调用 report.generate 生成每日工作简报(多视图 + 列表数据)
+  - id: gen_daily_briefing
+    type: tool
+    tool: report.generate
+    params:
+      report_id: "work_report:daily_briefing"
+      data:
+        user_name: "{{service_name}}_运维同学"
+        summary_text: "服务 {{service_name}} 今日运行率 {{uptime_pct}}%,错误数 {{error_count}}。"
+        action_items:
+          - "检查错误日志(共 {{error_count}} 条)"
+          - "确认延迟指标 {{latency_ms}}ms 是否达标"
+        date_str: "{{date_str}}"
+      view: "summary"
+    output: daily_briefing

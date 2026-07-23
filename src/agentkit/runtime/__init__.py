@@ -15,6 +15,8 @@
     - event_hooks:  EventBusHooks（LifecycleHooks 子类，hook→事件翻译）
     - artifact:     ArtifactStore（写序协议）+ GCSweeper（孤儿对账）
     - blocking:     BlockingExecutor（thread/process 卸载）+ 全局单例
+    - run_manager:  RunManager（状态机编排 + 取消编排 + 内存注册表）
+    - reconciler:   Reconciler（启动对账：僵尸 run + GC + 日志完整性）
 
 依赖方向：``runtime/`` → ``core/``（只读 hooks 契约）+ 标准库；不依赖 server。
 """
@@ -34,6 +36,8 @@ from agentkit.runtime.event import (
     RunEvent,
 )
 from agentkit.runtime.event_hooks import EventBusHooks
+from agentkit.runtime.reconciler import ReconcileResult, Reconciler
+from agentkit.runtime.run_manager import RunHandle, RunManager, RunSummary
 
 __all__ = [
     # event
@@ -53,4 +57,11 @@ __all__ = [
     "ExecutionMode",
     "get_blocking_executor",
     "set_blocking_executor",
+    # run_manager (P1)
+    "RunHandle",
+    "RunSummary",
+    "RunManager",
+    # reconciler (P1)
+    "ReconcileResult",
+    "Reconciler",
 ]
