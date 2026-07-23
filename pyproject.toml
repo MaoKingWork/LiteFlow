@@ -17,3 +17,12 @@ doc-convert = [
     "reportlab>=4.0",
     "python-docx>=1.2",
 ]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["src/agentkit/tests"]
+asyncio_mode = "auto"
+pythonpath = ["src"]

@@ -48,6 +48,35 @@ from typing import Any
 
 
 # ---------------------------------------------------------------------------
+# RunStatus —— 运行状态常量
+# ---------------------------------------------------------------------------
+class RunStatus:
+    """运行状态常量(:attr:`Checkpoint.status` 的合法取值)。
+
+    ``Checkpoint.status`` 为自由 ``str``,此类仅提供常量避免魔法字符串。
+    新增状态(``cancelling`` / ``cancelled`` / ``interrupted``)对旧检查点
+    无影响——:meth:`Checkpoint.from_dict` 宽松解析,旧代码遇到新状态值不会报错。
+
+    状态机::
+
+        running ──→ completed
+          │   └──→ failed
+          │   └──→ cancelling ──→ cancelled     (engine 层设置)
+          └──（进程重启）──→ interrupted          (Reconciler 设置, P1)
+
+    引擎层仅设置 ``running`` / ``completed`` / ``failed`` / ``cancelled``;
+    ``cancelling`` 与 ``interrupted`` 由 runtime/server 层(P1)管理。
+    """
+
+    RUNNING = "running"
+    CANCELLING = "cancelling"
+    CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+# ---------------------------------------------------------------------------
 # Checkpoint —— 单次工作流运行的检查点
 # ---------------------------------------------------------------------------
 @dataclass
@@ -62,7 +91,8 @@ class Checkpoint:
     Attributes:
         run_id:           唯一运行 id。
         workflow_name:    所属 Workflow 名称,用于按 Workflow 过滤列出 run。
-        status:           运行状态,``running`` | ``completed`` | ``failed``。
+        status:           运行状态,见 :class:`RunStatus`(``running`` / ``completed``
+                          / ``failed`` / ``cancelled`` / ``cancelling`` / ``interrupted``)。
         completed_steps:  已完成 step id 的顺序列表(resume 时跳过这些 Step)。
         context_snapshot: ``Context.snapshot()`` 结果(小对象快照 + 大对象指针)。
         started_at:       运行开始时间戳(``time.time()``)。
@@ -381,6 +411,7 @@ class RedisCheckpointStore(CheckpointStore):
 
 
 __all__ = [
+    "RunStatus",
     "Checkpoint",
     "CheckpointStore",
     "LocalCheckpointStore",

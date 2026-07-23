@@ -30,6 +30,7 @@ from agentkit.steps.base import BaseStep, register_step
 
 if TYPE_CHECKING:
     from agentkit.config import RetryPolicy
+    from agentkit.core.cancel import CancelToken
     from agentkit.core.context import Context
     from agentkit.core.hooks import LifecycleHooks
     from agentkit.mcp.manager import MCPManager
@@ -141,6 +142,7 @@ class LoopStep(BaseStep):
         # 运行期 scratch
         self._current_hooks: "LifecycleHooks | None" = None
         self._current_retry_policy: "RetryPolicy | None" = None
+        self._current_cancel_token: "CancelToken | None" = None
         self._loop_count: int = 0
 
     def bind_mcp_manager(self, manager: "MCPManager | None") -> None:
@@ -154,6 +156,12 @@ class LoopStep(BaseStep):
         super().bind_llm_client(client)
         if self.body is not None:
             self.body.bind_llm_client(client)
+
+    def bind_blocking_executor(self, executor: "Any") -> None:
+        """重写:递归传播到循环体 body,与 bind_mcp_manager 保持一致。"""
+        super().bind_blocking_executor(executor)
+        if self.body is not None:
+            self.body.bind_blocking_executor(executor)
 
     async def run(self, ctx: "Context") -> "Context":
         """根据模式执行迭代或条件重试。"""
@@ -217,17 +225,23 @@ class LoopStep(BaseStep):
         if self.output_mode == "append":
             acc = self._seed_acc(ctx, out_key)
             for item in items:
+                if self._cancelled():
+                    break
                 ctx.set(self.item_var, item)
                 await self._exec_body(ctx)
                 acc = self._append_delta(ctx, acc, out_key, body_out)
         elif self.output_mode == "last":
             for item in items:
+                if self._cancelled():
+                    break
                 ctx.set(self.item_var, item)
                 await self._exec_body(ctx)
             # body.output 自然保留最后一次写入,无需额外处理
         else:  # collect
             collected: list[Any] = []
             for item in items:
+                if self._cancelled():
+                    break
                 ctx.set(self.item_var, item)
                 await self._exec_body(ctx)
                 # 修复:从 body 实际写入的键读取,而非聚合目标
@@ -256,6 +270,8 @@ class LoopStep(BaseStep):
         acc = self._seed_acc(ctx, out_key) if self.output_mode == "append" else ""
 
         for _ in range(max_iter):
+            if self._cancelled():
+                break
             await self._exec_body(ctx)
 
             if self.output_mode == "append":
@@ -288,6 +304,7 @@ class LoopStep(BaseStep):
             ctx,
             self._current_hooks,
             retry_policy=self._current_retry_policy,
+            cancel_token=self._current_cancel_token,
         )
         self._loop_count += 1
 
@@ -330,6 +347,13 @@ class LoopStep(BaseStep):
     # ------------------------------------------------------------------
     # 辅助:执行编排
     # ------------------------------------------------------------------
+    def _cancelled(self) -> bool:
+        """检查取消令牌是否已触发(graceful 取消)。"""
+        return (
+            self._current_cancel_token is not None
+            and self._current_cancel_token.is_cancelled
+        )
+
     def _effective_max(self) -> int:
         """返回生效的最大迭代次数。"""
         if self.max_iterations is not None:
@@ -342,11 +366,15 @@ class LoopStep(BaseStep):
         hooks: "LifecycleHooks | None" = None,
         *,
         retry_policy: "RetryPolicy | None" = None,
+        cancel_token: "CancelToken | None" = None,
     ) -> "StepTrace":
-        """重写:暂存 hooks 与 retry_policy,供内部 Step ``execute`` 使用。"""
+        """重写:暂存 hooks / retry_policy / cancel_token,供内部 Step 使用。"""
         self._current_hooks = hooks
         self._current_retry_policy = retry_policy
-        return await super().execute(ctx, hooks, retry_policy=retry_policy)
+        self._current_cancel_token = cancel_token
+        return await super().execute(
+            ctx, hooks, retry_policy=retry_policy, cancel_token=cancel_token
+        )
 
     def _enrich_trace(self, trace: "StepTrace") -> None:
         """记录实际迭代次数。"""

@@ -33,6 +33,7 @@ from agentkit.steps.base import BaseStep, register_step
 
 if TYPE_CHECKING:
     from agentkit.config import RetryPolicy
+    from agentkit.core.cancel import CancelToken
     from agentkit.core.context import Context
     from agentkit.core.hooks import LifecycleHooks
     from agentkit.mcp.manager import MCPManager
@@ -123,6 +124,7 @@ class ParallelStep(BaseStep):
         # 运行期 scratch
         self._current_hooks: "LifecycleHooks | None" = None
         self._current_retry_policy: "RetryPolicy | None" = None
+        self._current_cancel_token: "CancelToken | None" = None
         self._branch_statuses: list[dict[str, Any]] = []
 
     def bind_mcp_manager(self, manager: "MCPManager | None") -> None:
@@ -136,6 +138,12 @@ class ParallelStep(BaseStep):
         super().bind_llm_client(client)
         for b in self.branches:
             b.bind_llm_client(client)
+
+    def bind_blocking_executor(self, executor: "Any") -> None:
+        """重写:递归传播到所有分支,与 bind_mcp_manager 保持一致。"""
+        super().bind_blocking_executor(executor)
+        for b in self.branches:
+            b.bind_blocking_executor(executor)
 
     async def run(self, ctx: "Context") -> "Context":
         """并发执行所有分支。"""
@@ -153,6 +161,7 @@ class ParallelStep(BaseStep):
                     ctx,
                     self._current_hooks,
                     retry_policy=self._current_retry_policy,
+                    cancel_token=self._current_cancel_token,
                 )
 
         if self.on_error == "fail_fast":
@@ -225,11 +234,15 @@ class ParallelStep(BaseStep):
         hooks: "LifecycleHooks | None" = None,
         *,
         retry_policy: "RetryPolicy | None" = None,
+        cancel_token: "CancelToken | None" = None,
     ) -> "StepTrace":
-        """重写:暂存 hooks 与 retry_policy,供分支 ``execute`` 使用。"""
+        """重写:暂存 hooks / retry_policy / cancel_token,供分支 ``execute`` 使用。"""
         self._current_hooks = hooks
         self._current_retry_policy = retry_policy
-        return await super().execute(ctx, hooks, retry_policy=retry_policy)
+        self._current_cancel_token = cancel_token
+        return await super().execute(
+            ctx, hooks, retry_policy=retry_policy, cancel_token=cancel_token
+        )
 
     def _enrich_trace(self, trace: "StepTrace") -> None:
         """记录分支执行状态。"""

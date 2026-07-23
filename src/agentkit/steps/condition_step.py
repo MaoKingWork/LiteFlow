@@ -23,13 +23,14 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from agentkit.core.template import eval_expression
 from agentkit.steps.base import BaseStep, register_step
 
 if TYPE_CHECKING:
     from agentkit.config import RetryPolicy
+    from agentkit.core.cancel import CancelToken
     from agentkit.core.context import Context
     from agentkit.core.hooks import LifecycleHooks
     from agentkit.mcp.manager import MCPManager
@@ -92,6 +93,7 @@ class ConditionStep(BaseStep):
         self._branch_taken: str = ""
         self._current_hooks: "LifecycleHooks | None" = None
         self._current_retry_policy: "RetryPolicy | None" = None
+        self._current_cancel_token: "CancelToken | None" = None
 
     def bind_mcp_manager(self, manager: "MCPManager | None") -> None:
         """重写:递归传播到 then/else 子步骤,确保分支内 LLMStep 也能拿到 MCP 工具。"""
@@ -109,6 +111,14 @@ class ConditionStep(BaseStep):
         for s in self.else_steps:
             s.bind_llm_client(client)
 
+    def bind_blocking_executor(self, executor: Any) -> None:
+        """重写:递归传播到 then/else 子步骤,与 bind_mcp_manager 保持一致。"""
+        super().bind_blocking_executor(executor)
+        for s in self.then_steps:
+            s.bind_blocking_executor(executor)
+        for s in self.else_steps:
+            s.bind_blocking_executor(executor)
+
     async def run(self, ctx: "Context") -> "Context":
         """求值条件并执行对应分支的子步骤序列。
 
@@ -122,10 +132,13 @@ class ConditionStep(BaseStep):
 
         steps = self.then_steps if taken else self.else_steps
         for step in steps:
+            if self._current_cancel_token is not None and self._current_cancel_token.is_cancelled:
+                break
             await step.execute(
                 ctx,
                 self._current_hooks,
                 retry_policy=self._current_retry_policy,
+                cancel_token=self._current_cancel_token,
             )
         return ctx
 
@@ -135,13 +148,17 @@ class ConditionStep(BaseStep):
         hooks: "LifecycleHooks | None" = None,
         *,
         retry_policy: "RetryPolicy | None" = None,
+        cancel_token: "CancelToken | None" = None,
     ) -> "StepTrace":
-        """重写:暂存 hooks 与 retry_policy,供子步骤 ``execute`` 使用。"""
+        """重写:暂存 hooks / retry_policy / cancel_token,供子步骤 ``execute`` 使用。"""
         from agentkit.steps.base import StepTrace  # 延迟导入避免循环
 
         self._current_hooks = hooks
         self._current_retry_policy = retry_policy
-        return await super().execute(ctx, hooks, retry_policy=retry_policy)
+        self._current_cancel_token = cancel_token
+        return await super().execute(
+            ctx, hooks, retry_policy=retry_policy, cancel_token=cancel_token
+        )
 
     def _enrich_trace(self, trace: "StepTrace") -> None:
         """记录走了哪个分支。"""

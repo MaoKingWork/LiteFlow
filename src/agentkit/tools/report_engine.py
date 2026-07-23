@@ -62,10 +62,14 @@ class ReportEngineTool(Tool):
         name:        注册名,默认 ``"report.generate"``。
         role:        语义角色 ``"sink"``(输出终端)。
         description: 供 LLM 理解用途的自然语言描述。
+        execution:   ``"thread"`` —— render 链(reportlab / python-docx /
+                     markdown2)为同步阻塞库,经 ``asyncio.to_thread`` 卸载到
+                     子线程,避免阻塞主事件循环(对齐 §5.5)。
     """
 
     name = "report.generate"
     role = "sink"
+    execution = "thread"
     description = (
         "生成格式化的 Markdown 报告。输入报告 ID、数据和视图名,"
         "返回报告的 file_uri 与内容预览。失败时返回 error 字段。"

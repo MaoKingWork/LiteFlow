@@ -28,6 +28,7 @@ from agentkit.tools.base import get_tool
 
 if TYPE_CHECKING:
     from agentkit.config import RetryPolicy
+    from agentkit.core.cancel import CancelToken
     from agentkit.core.context import Context
     from agentkit.core.hooks import LifecycleHooks
 
@@ -103,8 +104,16 @@ class ToolStep(BaseStep):
         # 取工具(未注册抛 KeyError,由 execute 重试/钩子处理)
         tool_instance = get_tool(self.tool)
 
-        # 调用工具
-        result = await tool_instance.call(resolved_params, ctx)
+        # 按 tool.execution 分派:inline(默认)/ thread / process
+        # inline 路径等价于直接 ``await tool.call(params, ctx)``，行为同现状；
+        # thread / process 由 BlockingExecutor 卸载到子线程 / 子进程（对齐 §5.5）。
+        # 优先用注入的 _blocking_executor，否则回落到全局单例。
+        executor = self._blocking_executor
+        if executor is None:
+            # 延迟导入：避免 steps → runtime → ... 的模块加载期循环
+            from agentkit.runtime.blocking import get_blocking_executor
+            executor = get_blocking_executor()
+        result = await executor.run_tool(tool_instance, resolved_params, ctx)
         if not isinstance(result, dict):
             result = {"value": result}
 
@@ -136,10 +145,13 @@ class ToolStep(BaseStep):
         hooks: "LifecycleHooks | None" = None,
         *,
         retry_policy: "RetryPolicy | None" = None,
+        cancel_token: "CancelToken | None" = None,
     ) -> StepTrace:
         """重写:在调用 super().execute 前暂存 hooks,供 run 中触发 on_tool_call。"""
         self._current_hooks = hooks
-        return await super().execute(ctx, hooks, retry_policy=retry_policy)
+        return await super().execute(
+            ctx, hooks, retry_policy=retry_policy, cancel_token=cancel_token
+        )
 
     def _enrich_trace(self, trace: StepTrace) -> None:
         """把工具调用记录回填到 trace。"""

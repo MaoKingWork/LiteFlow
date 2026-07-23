@@ -70,6 +70,13 @@ _DEFAULTS: dict[str, Any] = {
     # 被 core.workflow 使用:Workflow 构造时若未显式传入 hooks 且此项为 True,
     # 则自动装配默认 hooks,使日志与 token 计量开箱即用,无需 --verbose。
     "default_hooks_enabled": True,
+    # BlockingExecutor 线程池大小。被 runtime.blocking 使用;
+    # 工具标记 execution="thread" 时经共享 ThreadPoolExecutor 卸载,
+    # 避免 reportlab / python-docx 等同步阻塞库卡住主事件循环。
+    "executor_max_workers": 4,
+    # BlockingExecutor 进程池大小。被 runtime.blocking 使用;
+    # 工具标记 execution="process" 时经 ProcessPoolExecutor 卸载(P0 未实现)。
+    "executor_max_processes": 2,
 }
 
 
