@@ -281,6 +281,31 @@ def _compile_step(
             agent = agent_configs[agent_ref]
         else:
             agent = agent_ref
+
+        # 解析 conversation 配置块（v0.5 新增）
+        # 不配置 conversation 时全部走默认值，行为与旧版完全一致（向后兼容）。
+        # key/from 支持 {{var}} 模板，此处原样保留字符串，运行期由 LLMStep 渲染。
+        conv = step_dict.get("conversation")
+        if conv:
+            conv_mode = conv.get("mode")
+            conv_key = conv.get("key")
+            conv_from = conv.get("from")
+            conv_fork_at = conv.get("fork_at", "last")
+            conv_compat = conv.get("compat", "strict")
+        else:
+            conv_mode = None
+            conv_key = None
+            conv_from = None
+            conv_fork_at = "last"
+            conv_compat = "strict"
+
+        # 校验 compat 合法取值（strict / passthrough）
+        if conv_compat not in ("strict", "passthrough"):
+            raise ValueError(
+                f"Step {step_id!r} 的 conversation.compat 仅支持 strict|passthrough，"
+                f"得到 {conv_compat!r}"
+            )
+
         return step_cls(
             id=step_id,
             agent=agent,
@@ -293,6 +318,12 @@ def _compile_step(
             inputs=inputs,
             outputs=outputs_list,
             strict_scope=strict_scope,
+            # 会话参数（v0.5 新增）
+            conversation_mode=conv_mode,
+            conversation_key=conv_key,
+            conversation_from=conv_from,
+            conversation_fork_at=conv_fork_at,
+            conversation_compat=conv_compat,
         )
 
     elif step_type == "tool":

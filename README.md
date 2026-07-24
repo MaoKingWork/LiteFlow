@@ -1,8 +1,41 @@
-# AgentKit
+# LiteFlow
 
-轻量化智能体框架，采用双层架构（YAML 配置层 + Python SDK 层），围绕 8 个核心概念构建：Agent / Tool / Skill / MCP / Step / Context / Workflow / Hooks。
+> 轻量、简洁，易于维护和扩展。使用简单便捷，但不限制上限。
+
+LiteFlow 是一个智能体工作流与报告生成平台，包含两个核心组件：
+
+- **AgentKit** — 轻量化智能体框架，采用双层架构（YAML 配置层 + Python SDK 层），围绕 8 个核心概念构建：Agent / Tool / Skill / MCP / Step / Context / Workflow / Hooks
+- **Report Engine SDK** — 协议无关、配置驱动的 Markdown 报告生成引擎，通过 Pack 组织模板与规则，支持多角色多视图输出，内置 AgentKit / MCP / LangChain / FastAPI 适配器
+
+两个组件可独立使用，也可通过适配器深度集成：AgentKit 工作流中的 ToolStep / LLMStep 可直接调用 Report Engine 生成报告，产物经运行时层自动落盘并推送事件。
+
+## 环境要求与安装
+
+环境要求：Python >= 3.14，使用 [uv](https://docs.astral.sh/uv/) 管理依赖。
+
+```bash
+# 安装依赖（含 agentkit 核心）
+uv sync
+```
+
+可选依赖按需安装：
+
+```bash
+uv sync --extra doc-convert    # Markdown → DOCX / PDF / HTML 转换（reportlab / python-docx）
+uv sync --extra server         # 可视化服务（FastAPI + uvicorn + SSE）
+uv sync --extra dev            # pytest + pytest-asyncio + httpx（开发测试）
+```
+
+Report Engine SDK 作为子包随主项目安装，其独立可选依赖：
+
+```bash
+uv sync --extra doc-convert    # 含 report-engine-sdk 的 agentkit 适配器（pydantic）
+# report-engine-sdk 还支持 mcp / langchain / api / s3 可选依赖，按需在 pyproject.toml 中添加
+```
 
 ## 核心特性
+
+### AgentKit
 
 - **双层架构**：YAML 声明式配置 + Python SDK，按需选择抽象层级
 - **6 种 Step 类型**：tool / llm / condition / loop / parallel / skill，覆盖常见编排场景
@@ -15,23 +48,17 @@
 - **LLM 客户端生命周期托管**：`async with` 自动关闭连接，避免泄漏
 - **Skill 能力包**：系统提示词 + 输出契约 + 专属工具的封装单元，支持多 Skill 合并
 - **MCP 自动发现**：连接 MCP Server 后自动注册其工具为框架一等公民
-- **多 LLM 提供商**：内置 DeepSeek 预设，兼容所有 OpenAI Chat Completions API
+- **多 LLM 提供商**：内置 DeepSeek 与 MiMo 预设，兼容所有 OpenAI Chat Completions API
+- **可视化服务**：内置 FastAPI + SSE 服务，支持工作流管理、运行控制、产物浏览与实时事件推送
 
-## 安装
+### Report Engine SDK
 
-```bash
-pip install -e .
-```
-
-可选依赖按需安装：
-
-```bash
-pip install -e ".[openai]"    # OpenAI SDK（DeepSeek 等兼容客户端）
-pip install -e ".[redis]"     # Redis 检查点存储
-pip install -e ".[dev]"       # pytest + pytest-asyncio
-```
-
-环境要求：Python >= 3.11
+- **Pack 驱动**：每个 Pack 自包含 `pack.json` + 模板 + 规则 + 变量，可独立拥有与版本化
+- **两步流水线**：`evaluate`（校验 + 规则计算）→ `render`（模板渲染），也支持直接渲染跳过计算
+- **多角色多视图**：通过 `view` 参数切换报告视角（如管理者视图 / 教师视图），单模板多角色输出
+- **声明式规则引擎**：`rules` 管线支持声明式公式 + 命令式插件，`{"ref": ...}` 引用 Pack 共享规则
+- **多适配器**：AgentKit Tool / MCP Server / LangChain Tool / FastAPI Router，协议无关核心 + 可选框架集成
+- **多存储后端**：Local / Memory / S3，通过 `StorageBackend` 抽象统一接口
 
 ## 快速开始
 
@@ -129,6 +156,31 @@ async def main():
 
 asyncio.run(main())
 ```
+
+### 方式三：Report Engine SDK
+
+```python
+from report_engine_sdk import ReportEngine, LocalStorage
+
+# 构建 Engine：配置目录 + 存储后端
+engine = ReportEngine("src/report_engine_sdk/config", LocalStorage("./output"))
+
+# evaluate → render 两步流水线
+result = engine.evaluate("ops_report:health_check", {
+    "service_name": "api-gateway",
+    "uptime_pct": 99.95,
+    "error_count": 3,
+    "latency_ms": 45.2,
+    "date_str": "2026-07-23",
+})
+
+if result.success:
+    rendered = engine.render("ops_report:health_check", result.data, view="default")
+    print(rendered.content)   # Markdown 报告
+    print(rendered.uri)       # file:// URI
+```
+
+AgentKit 与 Report Engine SDK 深度集成示例见 `examples/run_report_demo.py`，展示 ToolStep 声明式调用报告生成、产物自动落盘与事件推送完整链路。
 
 ## 核心概念
 
@@ -230,6 +282,8 @@ asyncio.run(main())
 
 `when` 表达式支持 `{{var}}` 变量替换与比较/布尔/算术运算，经 AST 安全求值（不调用 `eval()`）。多路分支用 condition 链实现（上一个 condition 的 `else` 中放下一个 condition）。
 
+> **引号约定**：`{{var}}` 在表达式求值时会被替换为变量的 Python 字面量（字符串自动加 `repr` 引号），因此**不要**在 `{{var}}` 外面再加引号。写 `'{{status}}' == 'ok'` 会导致双重引号并抛 `TemplateError`。正确写法是 `{{status}} == 'ok'`。
+
 ### loop — 循环
 
 两种模式：迭代列表（`iter`）遍历元素执行内部 Step；条件重试（`until`）重复执行直到表达式为真。
@@ -252,7 +306,7 @@ asyncio.run(main())
 # 条件重试
 - id: retry_until_valid
   type: loop
-  until: "'{{validation_pass}}' == 'true'"
+  until: "{{validation_pass}} == 'true'"
   max: 3
   on_max: fail
   step:
@@ -622,6 +676,7 @@ wf = Workflow(name="chat", steps=[...], hooks=hooks)
 |--------|----------|
 | `OpenAIClient` | 真流式：解析 SSE 行，按 `index` 累积 `tool_calls`，末尾交付完整列表 |
 | `DeepSeekClient` | 继承 `OpenAIClient`，覆盖 `_build_body` 注入 thinking / reasoning_effort / json_output |
+| `MiMoClient` | 继承 `OpenAIClient`，组合 `thinking.py` 叠加思考模式，支持图片/音频/视频多模态 |
 | `MockClient` | 切片流式：`stream_chunk_size > 0` 时按字节切片模拟增量，否则一次性 yield |
 | 自定义 `LLMClient` 子类 | 不实现 `chat_stream` 时自动退化为单次 `chat` 调用，零成本满足接口契约 |
 
@@ -733,12 +788,14 @@ wf = Workflow(name="demo", steps=[...], hooks=hooks)
 
 ### 内置预设提供商
 
-| 名称 | 模型 | 特性 |
-|------|------|------|
-| `deepseek` | deepseek-v4-pro | 思考模式开启，reasoning_effort=high |
-| `deepseek-flash` | deepseek-v4-flash | 思考模式关闭，更快更省 |
+| 名称 | 模型 | 提供商类型 | 特性 |
+|------|------|-----------|------|
+| `deepseek` | deepseek-v4-pro | deepseek | 思考模式开启，reasoning_effort=high |
+| `deepseek-flash` | deepseek-v4-flash | deepseek | 思考模式关闭，更快更省 |
+| `mimo` | mimo-v2.5-pro | mimo | 思考模式开启，文本推理强项 |
+| `mimo-omni` | mimo-v2.5 | mimo | 思考模式开启，支持图片/音频/视频理解 |
 
-API Key 从环境变量 `DEEPSEEK_API_KEY` 读取。
+API Key 从环境变量读取：DeepSeek 用 `DEEPSEEK_API_KEY`，MiMo 用 `MIMO_API_KEY`。
 
 ### 注册自定义提供商
 
@@ -754,7 +811,7 @@ register_provider(LLMProvider(
 ))
 ```
 
-所有提供商须兼容 OpenAI Chat Completions API（`POST {base_url}/chat/completions`）。`provider_type="openai"` 创建通用 `OpenAIClient`，`provider_type="deepseek"` 创建带深度优化的 `DeepSeekClient`。
+所有提供商须兼容 OpenAI Chat Completions API（`POST {base_url}/chat/completions`）。`provider_type="openai"` 创建通用 `OpenAIClient`，`provider_type="deepseek"` 创建带深度优化的 `DeepSeekClient`，`provider_type="mimo"` 创建支持思考与多模态的 `MiMoClient`。
 
 ### 在工作流中使用
 
@@ -1012,9 +1069,14 @@ agentkit dry-run workflow.yaml
 
 # MCP Server 健康检查
 agentkit mcp health-check --yaml-path workflow.yaml
+
+# 启动可视化服务（FastAPI + SSE）
+agentkit serve --dir ./workflows --port 8000
 ```
 
-`run` 命令运行结束后自动输出 TraceSummary（Step 级耗时、Token 用量、失败链）。`--input` 支持 JSON 值：`--input count=5`（解析为 int）、`--input tags='["a","b"]'`（解析为 list）。
+`run` 命令运行结束后自动输出 TraceSummary（Step 级耗时、Token 用量、失败链）。`--input` 支持 JSON 值：`--input count=5`（解析为 int）、`--input tags='["a","b"]'`（解析为 list）。`--verbose` / `-v` 开启 DEBUG 级日志，排查网络/协议问题。
+
+`serve` 命令启动 FastAPI 可视化服务，支持 `--host`（绑定地址）、`--port`（端口）、`--token`（鉴权 bearer token）、`--cors-origins`（CORS 允许的 origin）等参数。详见[可视化服务](#可视化服务)章节。
 
 ## 全局配置
 
@@ -1048,9 +1110,21 @@ reset_default("default_max_tool_iterations")
 | `default_max_tool_iterations` | 5 | Function Call 最大轮次 |
 | `default_max_loop_iterations` | 100 | LoopStep 最大迭代次数 |
 | `context_snapshot_big_object_summary_len` | 200 | 快照中大对象摘要最大长度 |
-| `llm_request_timeout_seconds` | 120.0 | LLM 单次请求超时 |
+| `llm_request_timeout_seconds` | 180.0 | LLM 单次请求超时 |
 | `default_llm_provider` | `"deepseek"` | 默认 LLM 提供商名 |
 | `default_hooks_enabled` | `True` | 是否默认装配可观测性 Hooks |
+| `executor_max_workers` | 4 | BlockingExecutor 线程池大小（同步阻塞库卸载） |
+| `executor_max_processes` | 2 | BlockingExecutor 进程池大小（P0 未实现） |
+| `server_host` | `"127.0.0.1"` | Server 绑定地址 |
+| `server_port` | 8000 | Server 端口 |
+| `server_token` | `""` | Server 鉴权 bearer token（空=仅本地） |
+| `server_cors_origins` | `[]` | CORS 允许的 origin 列表（空=关闭） |
+| `server_event_queue_size` | 1000 | EventBus 每订阅者队列容量 |
+| `server_event_log_max_events` | 100000 | 单 run 事件日志最大事件数 |
+| `server_artifact_max_size` | 104857600 | 单 artifact 最大字节（100MB） |
+| `server_artifact_max_total` | 1073741824 | 单 run 产物总量最大字节（1GB） |
+| `server_gc_interval_seconds` | 21600 | GCSweeper 定时扫描间隔（6h） |
+| `server_gc_orphan_grace_seconds` | 86400 | GCSweeper 孤儿文件宽限期（24h） |
 
 ## 自定义 Step
 
@@ -1103,76 +1177,281 @@ CLI 同样支持：
 agentkit run workflow.yaml --resume <run_id>
 ```
 
+## Report Engine SDK
+
+Report Engine SDK 是协议无关、配置驱动的 Markdown 报告生成引擎。通过 **Pack** 组织模板与规则，支持多角色多视图输出，内置多种框架适配器。
+
+### Pack 结构
+
+每个 Pack 是一个自包含目录，独立拥有与版本化：
+
+```
+config/packs/
+└── ops_report/
+    ├── pack.json              # 清单：报告定义 + input_schema + rules + templates
+    └── templates/
+        └── health_check.md    # Jinja2 模板
+```
+
+报告的全局标识为 `"<pack_id>:<report_name>"`（如 `ops_report:health_check`），跨 Pack 唯一。
+
+### pack.json 格式
+
+```json
+{
+  "pack_id": "ops_report",
+  "version": "1.0.0",
+  "reports": {
+    "health_check": {
+      "input_schema": {
+        "type": "object",
+        "required": ["service_name", "uptime_pct"],
+        "properties": {
+          "service_name": {"type": "string"},
+          "uptime_pct": {"type": "number"}
+        }
+      },
+      "rules": [
+        {"field": "status", "formula": "'healthy' if uptime_pct >= 99.9 else 'warning'"}
+      ],
+      "templates": {
+        "default": "templates/health_check.md"
+      }
+    }
+  }
+}
+```
+
+`rules` 管线支持声明式公式（`formula`）与命令式插件（`plugin`），`{"ref": "..."}` 可引用 Pack 共享规则文件。`templates` 是多视图映射，通过 `view` 参数切换视角。
+
+### 两步流水线
+
+```python
+from report_engine_sdk import ReportEngine, FileSystemPackProvider, LocalStorage
+
+# 构建 Engine：配置目录 + 存储后端
+engine = ReportEngine("config/packs", LocalStorage("./output"))
+
+# 1. evaluate：校验 input_schema + 执行 rules 管线
+result = engine.evaluate("ops_report:health_check", {
+    "service_name": "api-gateway",
+    "uptime_pct": 99.95,
+    "error_count": 3,
+    "latency_ms": 45.2,
+    "date_str": "2026-07-23",
+})
+# result.success → True, result.data → 含 rules 计算结果的完整 dict
+
+# 2. render：Jinja2 模板渲染，支持多视图
+rendered = engine.render("ops_report:health_check", result.data, view="default")
+# rendered.content → Markdown 字符串
+# rendered.uri → file:// URI（LocalStorage 落盘时）
+```
+
+已有结构化数据时可跳过 evaluate，直接调用 `render`。
+
+### 适配器
+
+| 适配器 | 模块 | 说明 |
+|--------|------|------|
+| AgentKit Tool | `adapters.agentkit` | 包装为 agentkit `Tool`，支持 ToolStep 与 LLM Function Call |
+| MCP Server | `adapters.mcp_server` | 暴露为 MCP Server 工具 |
+| LangChain Tool | `adapters.langchain_tool` | 包装为 LangChain Tool |
+| FastAPI Router | `adapters.api_router` | 挂载为 FastAPI 路由 |
+
+AgentKit 适配器深度集成框架特性：`execution="thread"` 卸载到子线程避免阻塞事件循环，`role="sink"` 语义角色，注入 `ArtifactStore` 后自动落盘 + 发 `ARTIFACT_PRODUCED` 事件。
+
+### 存储后端
+
+| 后端 | 类 | 说明 |
+|------|-----|------|
+| 本地文件 | `LocalStorage` | 渲染结果落盘为 `file://` URI |
+| 内存 | `MemoryStorage` | 测试用，不持久化 |
+| S3 | `S3Storage` | 云存储（需 `boto3`） |
+
+### 内置 Pack
+
+| Pack | 报告 | 说明 |
+|------|------|------|
+| `ops_report` | `health_check` | 运维健康检查报告 |
+| `work_report` | `daily_briefing` | 每日工作简报（多视图） |
+| `teacher_eval` | `teacher` / `manager` | 教师评估（多角色多视图） |
+| `learning_report` | `learning_profile` | 学习画像报告（含规则引擎） |
+
+## 可视化服务
+
+AgentKit 内置 FastAPI + SSE 可视化服务，提供工作流管理、运行控制、产物浏览与实时事件推送。
+
+### 启动
+
+```bash
+# 安装 server 可选依赖
+uv sync --extra server
+
+# 启动服务
+agentkit serve --dir ./workflows --port 8000
+
+# 对外访问（需配置 token）
+agentkit serve --host 0.0.0.0 --port 8000 --token my-secret
+```
+
+### API 端点
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/health` | GET | 健康检查（不鉴权，容器探活用） |
+| `/api/workflows` | GET | 列出 `--dir` 目录下的工作流 YAML |
+| `/api/workflows/{name}` | GET | 获取工作流详情 |
+| `/api/runs` | POST | 启动工作流运行 |
+| `/api/runs` | GET | 列出运行记录 |
+| `/api/runs/{run_id}` | GET | 获取运行状态 |
+| `/api/runs/{run_id}/cancel` | POST | 取消运行（graceful / immediate） |
+| `/api/runs/{run_id}/resume` | POST | 从中断点恢复运行 |
+| `/api/runs/{run_id}/events` | GET | SSE 事件流（实时推送） |
+| `/api/runs/{run_id}/artifacts` | GET | 列出运行产物 |
+
+### 安全
+
+- 默认绑定 `127.0.0.1`，仅本地可访问
+- `--token` 设置 bearer token 鉴权（`/health` 豁免）
+- `--cors-origins` 配置 CORS 允许的 origin
+
+## 运行时层
+
+运行时层（`runtime/`）为可视化服务提供运行控制、事件分发、产物管理与崩溃恢复能力，与 `core/` 完全解耦（仅通过 hooks 接入）。
+
+| 模块 | 核心类 | 职责 |
+|------|--------|------|
+| `event` | `EventBus` / `EventLog` | RunEvent v1 协议 + 事件分发 + 持久化日志 |
+| `event_hooks` | `EventBusHooks` | LifecycleHooks 子类，hook → 事件翻译 |
+| `artifact` | `ArtifactStore` / `GCSweeper` | 产物写序协议 + 孤儿文件 GC 对账 |
+| `blocking` | `BlockingExecutor` | thread / process 卸载同步阻塞库（reportlab / python-docx） |
+| `run_manager` | `RunManager` | 状态机编排 + 取消编排 + 内存注册表 |
+| `reconciler` | `Reconciler` | 启动对账：僵尸 run 标记 + GC + 日志完整性检查 |
+
+崩溃恢复流程：`kill -9` 后重启 → Reconciler 标记 `interrupted` → `POST /resume` 从 checkpoint 恢复 → 跳过已完成 Step（sink 类工具不重复执行）。
+
 ## 项目结构
 
 ```
-agentkit/
-├── __init__.py              # 包入口，版本号
-├── cli.py                   # CLI 命令行入口
-├── config.py                # 全局配置中枢
-├── core/
-│   ├── agent.py             # AgentConfig 配置对象
-│   ├── context.py           # Context 共享状态
-│   ├── checkpoint.py        # 检查点存储
-│   ├── hooks.py             # 生命周期钩子
-│   ├── ports.py             # 端口系统（类型契约、输入绑定、输出校验）
-│   ├── template.py          # 模板引擎
-│   ├── trace_summary.py     # 执行轨迹汇总可视化
-│   └── workflow.py          # Workflow 编排器
-├── steps/
-│   ├── base.py              # BaseStep 抽象基类
-│   ├── tool_step.py         # 工具调用 Step
-│   ├── llm_step.py          # LLM 调用 Step
-│   ├── condition_step.py    # 条件分支 Step
-│   ├── loop_step.py         # 循环 Step
-│   ├── parallel_step.py     # 并行 Step
-│   └── skill_step.py        # Skill 调用 Step
-├── skill/
-│   ├── registry.py          # SkillManifest + SkillRegistry
-│   ├── loader.py            # Skill 包加载器
-│   └── merger.py            # 多 Skill 合并
-├── tools/
-│   ├── base.py              # Tool 抽象基类 + 注册机制
-│   └── report_engine.py     # ReportEngine 工具适配器
-├── mcp/
-│   └── manager.py           # MCP 连接管理 + 自动发现
-├── llm/
-│   ├── base.py              # LLMClient 抽象基类
-│   ├── provider.py          # 提供商配置与注册
-│   ├── openai.py            # OpenAI 兼容客户端
-│   ├── deepseek.py          # DeepSeek 深度优化客户端
-│   └── mock.py              # Mock 客户端（测试用）
-├── yaml/
-│   ├── loader.py            # YAML → SDK 对象编译器
-│   └── validator.py         # YAML 静态校验器
-└── parsers/                  # 输出解析器（text / json / pydantic）
+LiteFlow/
+├── src/
+│   ├── agentkit/                    # 智能体框架
+│   │   ├── __init__.py              # 包入口，版本号
+│   │   ├── cli.py                   # CLI 命令行入口（run / validate / dry-run / mcp / serve）
+│   │   ├── config.py                # 全局配置中枢
+│   │   ├── core/
+│   │   │   ├── agent.py             # AgentConfig 配置对象
+│   │   │   ├── context.py           # Context 共享状态（FrozenDict 不可变）
+│   │   │   ├── cancel.py            # CancelToken 取消信号
+│   │   │   ├── checkpoint.py        # 检查点存储
+│   │   │   ├── hooks.py             # 生命周期钩子
+│   │   │   ├── ports.py             # 端口系统（类型契约、输入绑定、输出校验）
+│   │   │   ├── template.py          # 模板引擎
+│   │   │   ├── trace_summary.py     # 执行轨迹汇总可视化
+│   │   │   └── workflow.py          # Workflow 编排器
+│   │   ├── steps/
+│   │   │   ├── base.py              # BaseStep 抽象基类
+│   │   │   ├── tool_step.py         # 工具调用 Step
+│   │   │   ├── llm_step.py          # LLM 调用 Step
+│   │   │   ├── condition_step.py    # 条件分支 Step
+│   │   │   ├── loop_step.py         # 循环 Step
+│   │   │   ├── parallel_step.py     # 并行 Step
+│   │   │   └── skill_step.py        # Skill 调用 Step
+│   │   ├── skill/
+│   │   │   ├── registry.py          # SkillManifest + SkillRegistry
+│   │   │   ├── loader.py            # Skill 包加载器
+│   │   │   └── merger.py            # 多 Skill 合并
+│   │   ├── tools/
+│   │   │   ├── base.py              # Tool 抽象基类 + 注册机制
+│   │   │   ├── db.py / http.py / file.py / time.py / sinks.py  # 内置工具
+│   │   │   └── md_convert/          # Markdown 转换工具（DOCX / PDF / HTML）
+│   │   ├── mcp/
+│   │   │   ├── manager.py           # MCP 连接管理 + 自动发现
+│   │   │   ├── client.py            # MCP 客户端
+│   │   │   └── wrapper.py           # MCP 工具包装器
+│   │   ├── llm/
+│   │   │   ├── base.py              # LLMClient 抽象基类
+│   │   │   ├── provider.py          # 提供商配置与注册
+│   │   │   ├── openai.py            # OpenAI 兼容客户端
+│   │   │   ├── deepseek.py          # DeepSeek 深度优化客户端
+│   │   │   ├── mimo.py              # MiMo 思考 + 多模态客户端
+│   │   │   ├── thinking.py          # 思考模式共享逻辑
+│   │   │   ├── media.py             # 多模态媒体处理
+│   │   │   └── mock.py              # Mock 客户端（测试用）
+│   │   ├── parsers/                 # 输出解析器（text / json / pydantic）
+│   │   ├── runtime/                 # 可视化运行时层
+│   │   │   ├── event.py             # RunEvent v1 协议 + EventBus + EventLog
+│   │   │   ├── event_hooks.py       # EventBusHooks（hook → 事件翻译）
+│   │   │   ├── artifact.py          # ArtifactStore + GCSweeper
+│   │   │   ├── blocking.py          # BlockingExecutor（thread/process 卸载）
+│   │   │   ├── run_manager.py       # RunManager（状态机 + 取消 + 注册表）
+│   │   │   └── reconciler.py        # Reconciler（启动对账 + 崩溃恢复）
+│   │   ├── server/                  # FastAPI 可视化服务
+│   │   │   ├── app.py               # 应用工厂 + 生命周期
+│   │   │   ├── settings.py          # ServerSettings
+│   │   │   ├── security.py          # 鉴权 + CORS
+│   │   │   ├── sse.py               # SSE 适配
+│   │   │   └── routes/              # workflows / runs / artifacts 路由
+│   │   ├── yaml/
+│   │   │   ├── loader.py            # YAML → SDK 对象编译器
+│   │   │   └── validator.py         # YAML 静态校验器
+│   │   └── tests/                   # 测试套件
+│   └── report_engine_sdk/           # 报告引擎 SDK
+│       ├── core/                    # 协议无关核心层
+│       │   ├── engine.py            # ReportEngine facade
+│       │   ├── config_provider.py   # Pack 配置提供者
+│       │   ├── pack_loader.py       # Pack 加载器
+│       │   ├── validator.py         # Schema 校验
+│       │   ├── calculator.py        # 规则计算引擎
+│       │   ├── renderer.py          # Jinja2 模板渲染
+│       │   └── plugin_registry.py   # 插件注册表
+│       ├── adapters/                # 框架适配器
+│       │   ├── agentkit.py          # AgentKit Tool 适配器
+│       │   ├── mcp_server.py        # MCP Server 适配器
+│       │   ├── langchain_tool.py    # LangChain Tool 适配器
+│       │   └── api_router.py        # FastAPI Router 适配器
+│       ├── storage/                 # 存储后端
+│       │   ├── local.py / memory.py / s3.py
+│       ├── config/packs/            # 内置 Pack（ops / work / teacher / learning）
+│       └── tests/
+├── examples/                        # 示例
+│   ├── report_demo.yaml             # 报告生成 × AgentKit 声明式演示
+│   ├── run_report_demo.py           # Python 入口（声明式 + LLM Function Call）
+│   └── story_best_practice.yaml     # Story 最佳实践
+├── docs/                            # 设计文档
+├── pyproject.toml                   # 项目配置（uv）
+├── uv.lock                          # 依赖锁定
+└── AGENTS.md                        # 项目规范
 ```
 
 ## 测试
 
 ```bash
 # 安装开发依赖
-pip install -e ".[dev]"
+uv sync --extra dev
 
 # 运行全部测试
-pytest
+uv run pytest
 
 # 运行特定测试文件
-pytest tests/test_template.py
+uv run pytest src/agentkit/tests/test_workflow.py
 
 # 查看详细输出
-pytest -v
+uv run pytest -v
 ```
 
-测试配置：`asyncio_mode = "auto"`，测试目录 `tests/`。
+测试配置：`asyncio_mode = "auto"`，AgentKit 测试目录 `src/agentkit/tests/`，Report Engine SDK 测试目录 `src/report_engine_sdk/tests/`。
 
 ## 设计原则
 
-- **高度模块化**：core / steps / skill / mcp / llm / tools / yaml 各司其职，子模块间通过 `TYPE_CHECKING` 避免循环依赖
+- **高度模块化**：core / steps / skill / mcp / llm / tools / yaml / runtime / server 各司其职，子模块间通过 `TYPE_CHECKING` 避免循环依赖
+- **协议无关核心**：report_engine_sdk 核心层零框架依赖，适配器懒加载可选依赖
 - **易于配置**：所有默认值集中在 `agentkit.config` 统一管理
 - **可拓展**：新增 Step 类型、Tool、Skill、LLM 提供商均通过注册机制接入
 - **不可变理念**：配置对象通过 `dataclasses.replace` 产生副本，不修改原对象
 - **安全求值**：模板表达式使用 AST 解析，不调用 `eval()`
+- **零侵入运行时**：runtime 层仅通过 hooks 接入，`core/` 不依赖 runtime
 
 ## 许可证
 

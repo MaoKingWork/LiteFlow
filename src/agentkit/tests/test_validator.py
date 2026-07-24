@@ -10,11 +10,41 @@
 """
 from __future__ import annotations
 
+import pytest
+
+from agentkit.steps.base import BaseStep
+from agentkit.steps.condition_step import ConditionStep
+from agentkit.steps.loop_step import LoopStep
+from agentkit.steps.parallel_step import ParallelStep
 from agentkit.yaml.validator import (
     ValidationError,
     ValidationReport,
+    _validate_condition_branch_consistency,
+    _validate_conversation_keys,
     validate_workflow,
 )
+
+
+class _StubStep(BaseStep):
+    """测试专用 Step:支持 output 与 conversation_key。
+
+    用于会话静态校验(T8)测试,不注册到全局 StepRegistry(不影响现有校验)。
+    会话能力在 T3 集成到 LLMStep 前用作占位叶子节点。
+    """
+
+    type = "stub"
+
+    def __init__(
+        self,
+        id: str = "",
+        output: str | None = None,
+        conversation_key: str | None = None,
+    ) -> None:
+        super().__init__(id=id, output=output)
+        self.conversation_key = conversation_key
+
+    async def run(self, ctx):
+        return ctx
 
 
 # ---------------------------------------------------------------------------
@@ -456,3 +486,143 @@ def test_validate_valid_workflow_has_no_errors():
     assert len(report.errors) == 0
     # 可能有 ghost dependency 警告,但合法 workflow 不应触发
     # 这里仅断言 errors 为空
+
+
+# ---------------------------------------------------------------------------
+# T8.1 _validate_conversation_keys —— 重名检测
+# ---------------------------------------------------------------------------
+def test_conversation_key_collision_with_output_raises():
+    """conversation.key 与 Step output 重名 → ValueError。"""
+    steps = [
+        _StubStep(id="s1", output="chat", conversation_key="chat"),
+    ]
+    with pytest.raises(ValueError, match="重名"):
+        _validate_conversation_keys(steps)
+
+
+def test_conversation_key_no_collision_passes():
+    """conversation.key 与所有 output 不同 → 通过。"""
+    steps = [
+        _StubStep(id="s1", output="result", conversation_key="chat"),
+        _StubStep(id="s2", output="other"),
+    ]
+    _validate_conversation_keys(steps)  # 不抛异常
+
+
+# ---------------------------------------------------------------------------
+# T8.1 _validate_conversation_keys —— 模板 key 跳过字面碰撞检查
+# ---------------------------------------------------------------------------
+def test_conversation_template_key_skipped_when_same_as_output():
+    """conversation.key 含 {{,与 output 字面相同 → 跳过检查,通过。"""
+    steps = [
+        _StubStep(
+            id="s1",
+            output="chat_{{provider}}",
+            conversation_key="chat_{{provider}}",
+        ),
+    ]
+    _validate_conversation_keys(steps)  # 不抛异常
+
+
+def test_conversation_template_key_no_literal_collision():
+    """conversation.key 含 {{,output 不同 → 不碰撞,通过。"""
+    steps = [
+        _StubStep(id="s1", output="chat", conversation_key="chat_{{provider}}"),
+    ]
+    _validate_conversation_keys(steps)
+
+
+# ---------------------------------------------------------------------------
+# T8.2 _validate_condition_branch_consistency —— 分支一致性
+# ---------------------------------------------------------------------------
+def test_condition_branch_key_inconsistent_raises():
+    """then/else 两侧 conversation.key 不同 → ValueError。"""
+    cond = ConditionStep(
+        id="c1",
+        when="true",
+        then_steps=[_StubStep(id="t1", output="out", conversation_key="chat_a")],
+        else_steps=[_StubStep(id="e1", output="out", conversation_key="chat_b")],
+    )
+    with pytest.raises(ValueError, match="conversation.key 不一致"):
+        _validate_condition_branch_consistency([cond])
+
+
+def test_condition_branch_output_inconsistent_raises():
+    """then/else 两侧 output 不同 → ValueError。"""
+    cond = ConditionStep(
+        id="c1",
+        when="true",
+        then_steps=[_StubStep(id="t1", output="out_a", conversation_key="chat")],
+        else_steps=[_StubStep(id="e1", output="out_b", conversation_key="chat")],
+    )
+    with pytest.raises(ValueError, match="output 不一致"):
+        _validate_condition_branch_consistency([cond])
+
+
+def test_condition_branch_consistent_passes():
+    """then/else 两侧 key 相同、output 相同 → 通过。"""
+    cond = ConditionStep(
+        id="c1",
+        when="true",
+        then_steps=[_StubStep(id="t1", output="out", conversation_key="chat")],
+        else_steps=[_StubStep(id="e1", output="out", conversation_key="chat")],
+    )
+    _validate_condition_branch_consistency([cond])
+
+
+def test_condition_only_one_side_has_conversation_passes():
+    """只有一侧有 conversation → 不约束,通过。"""
+    cond = ConditionStep(
+        id="c1",
+        when="true",
+        then_steps=[_StubStep(id="t1", output="out", conversation_key="chat")],
+        else_steps=[_StubStep(id="e1", output="out")],  # 无 conversation_key
+    )
+    _validate_condition_branch_consistency([cond])
+
+
+def test_condition_branch_template_key_literal_compare_passes():
+    """模板 key 在 then/else 两侧字面比较相同 → 通过。
+
+    分支一致性校验对模板 key 做字面比较(不跳过),两侧字面相等即通过。
+    """
+    cond = ConditionStep(
+        id="c1",
+        when="true",
+        then_steps=[
+            _StubStep(id="t1", output="out", conversation_key="chat_{{provider}}")
+        ],
+        else_steps=[
+            _StubStep(id="e1", output="out", conversation_key="chat_{{provider}}")
+        ],
+    )
+    _validate_condition_branch_consistency([cond])
+
+
+# ---------------------------------------------------------------------------
+# T8.3 嵌套结构遍历(walk_all_steps 递归发现)
+# ---------------------------------------------------------------------------
+def test_nested_loop_condition_conversation_discovered():
+    """loop 内含 condition,condition 内含 conversation → walk_all_steps 正确发现重名。"""
+    inner_cond = ConditionStep(
+        id="inner_cond",
+        when="true",
+        then_steps=[_StubStep(id="t1", output="chat", conversation_key="chat")],
+        else_steps=[_StubStep(id="e1", output="other", conversation_key="chat")],
+    )
+    loop = LoopStep(id="loop1", step=inner_cond)
+    with pytest.raises(ValueError, match="重名"):
+        _validate_conversation_keys([loop])
+
+
+def test_nested_parallel_branch_conversation_discovered():
+    """parallel 分支内含 conversation → 正确发现重名。"""
+    parallel = ParallelStep(
+        id="p1",
+        branches=[
+            _StubStep(id="b1", output="chat", conversation_key="chat"),
+            _StubStep(id="b2", output="other"),
+        ],
+    )
+    with pytest.raises(ValueError, match="重名"):
+        _validate_conversation_keys([parallel])
