@@ -567,7 +567,15 @@ class LLMStep(BaseStep):
             return {"error": err}
 
         try:
-            result = await tool.call(dict(tc.arguments), ctx)
+            # 按 tool.execution 分派:inline(默认)/ thread / process
+            # 与 ToolStep.run 保持一致；使 ReportEngineTool 标 thread 在
+            # Function Call 路径下也生效（对齐 §5.5）。
+            # 优先用注入的 _blocking_executor，否则回落到全局单例。
+            executor = self._blocking_executor
+            if executor is None:
+                from agentkit.runtime.blocking import get_blocking_executor
+                executor = get_blocking_executor()
+            result = await executor.run_tool(tool, dict(tc.arguments), ctx)
             # Tool 接口约定返回 dict;防御性处理非 dict 返回
             if not isinstance(result, dict):
                 result = {"value": result}

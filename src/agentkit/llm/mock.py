@@ -97,7 +97,7 @@ class MockClient(LLMClient):
             - ``reasoning_content``:  思考链内容(存入 raw 供 LLMStep 回填)
             - ``tool_calls``:         list[dict]，每个 dict 含 id / name / arguments
             - ``finish_reason``:      结束原因（可选）
-            - ``usage``:              LLMUsage 或 dict（可选）
+            - ``usage``:              LLMUsage 或 dict（可选，dict 自动转为 LLMUsage）
         """
         tool_calls: list[ToolCall] = []
         for tc in item.get("tool_calls") or []:
@@ -111,11 +111,16 @@ class MockClient(LLMClient):
         raw: dict[str, Any] | None = None
         if item.get("reasoning_content"):
             raw = {"reasoning_content": item["reasoning_content"]}
+        usage = item.get("usage", None)
+        if isinstance(usage, dict):
+            usage = LLMUsage(**usage)
+        elif usage is None:
+            usage = LLMUsage()
         return LLMResponse(
             content=item.get("content"),
             tool_calls=tool_calls,
             finish_reason=item.get("finish_reason", ""),
-            usage=item.get("usage", None) or LLMUsage(),  # type: ignore[arg-type]
+            usage=usage,
             raw=raw,
         )
 

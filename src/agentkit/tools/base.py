@@ -89,11 +89,19 @@ class Tool(ABC):
         role:        工具语义角色，``source`` | ``action`` | ``sink``。
         name:        注册名，由 ``@tool`` 装饰器或子类显式设置。
         description: 供 LLM Function Call 理解用途的自然语言描述。
+        execution:   执行模式，``inline`` | ``thread`` | ``process``。
+                     默认 ``inline``（直接 ``await``，行为同现状，零侵入）。
+                     ``thread`` 经共享 ``ThreadPoolExecutor`` 卸载到子线程，
+                     适用于同步阻塞库（reportlab / python-docx / markdown2）；
+                     ``process`` 经 ``ProcessPoolExecutor`` 卸载到子进程，
+                     契约：params/result 仅 JSON 可序列化、Context 不进子进程。
+                     详见 :class:`agentkit.runtime.blocking.BlockingExecutor`。
     """
 
     role: str = "action"
     name: str = ""
     description: str = ""
+    execution: str = "inline"
 
     @abstractmethod
     async def call(self, params: dict, ctx: "Context") -> dict:

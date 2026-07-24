@@ -35,6 +35,7 @@ from agentkit.steps.llm_step import LLMStep
 
 if TYPE_CHECKING:
     from agentkit.config import RetryPolicy
+    from agentkit.core.cancel import CancelToken
     from agentkit.core.context import Context
     from agentkit.core.hooks import LifecycleHooks
     from agentkit.llm.base import LLMClient
@@ -113,6 +114,7 @@ class SkillStep(BaseStep):
         # 运行期 scratch
         self._current_hooks: "LifecycleHooks | None" = None
         self._current_retry_policy: "RetryPolicy | None" = None
+        self._current_cancel_token: "CancelToken | None" = None
         self._skill_used: str = ""
 
     async def run(self, ctx: "Context") -> "Context":
@@ -138,11 +140,12 @@ class SkillStep(BaseStep):
         )
 
         # 委托 LLMStep 执行(prompt / mcp_manager / llm_client / 端口 一并透传)
+        # output 与 outputs 是同一信息的两种表示,仅传 outputs(规范化形式),
+        # 避免触发 BaseStep 的 output/outputs 互斥校验。
         llm_step = LLMStep(
             id=self.id or f"skill_{manifest.name}",
             agent=agent_config,
             prompt=self.prompt,
-            output=self.output,
             retry=self.retry,
             timeout=self.timeout,
             llm_client=self.llm_client,
@@ -156,6 +159,7 @@ class SkillStep(BaseStep):
             ctx,
             self._current_hooks,
             retry_policy=self._current_retry_policy,
+            cancel_token=self._current_cancel_token,
         )
         return ctx
 
@@ -165,11 +169,15 @@ class SkillStep(BaseStep):
         hooks: "LifecycleHooks | None" = None,
         *,
         retry_policy: "RetryPolicy | None" = None,
+        cancel_token: "CancelToken | None" = None,
     ) -> "StepTrace":
-        """重写:暂存 hooks 与 retry_policy,供 LLMStep ``execute`` 使用。"""
+        """重写:暂存 hooks / retry_policy / cancel_token,供 LLMStep ``execute`` 使用。"""
         self._current_hooks = hooks
         self._current_retry_policy = retry_policy
-        return await super().execute(ctx, hooks, retry_policy=retry_policy)
+        self._current_cancel_token = cancel_token
+        return await super().execute(
+            ctx, hooks, retry_policy=retry_policy, cancel_token=cancel_token
+        )
 
     def _enrich_trace(self, trace: "StepTrace") -> None:
         """记录使用的 Skill 名。"""

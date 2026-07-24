@@ -47,6 +47,7 @@ from agentkit.core.ports import (
 
 if TYPE_CHECKING:
     # 仅用于类型注解,运行时不导入,避免循环依赖。
+    from agentkit.core.cancel import CancelToken
     from agentkit.core.context import Context
     from agentkit.core.hooks import LifecycleHooks
     from agentkit.llm.base import LLMClient
@@ -148,6 +149,12 @@ class BaseStep(ABC):
     # None 表示未注入,LLMStep 会回落到 agentkit.llm.get_default_client()。
     llm_client: "LLMClient | None" = None
 
+    # 阻塞执行器引用;由 Workflow 经 bind_blocking_executor 注入(可选)。
+    # ToolStep 据此分派 inline / thread / process 调用;None 表示未注入,
+    # ToolStep 会回落到 agentkit.runtime.get_blocking_executor() 全局单例。
+    # 详见 docs/visualization-design.md §5.5。
+    _blocking_executor: Any = None
+
     def __init__(
         self,
         id: str = "",
@@ -178,6 +185,9 @@ class BaseStep(ABC):
         # 运行期 hooks 引用:由 execute 在调用 run 前设置,供子类(如 LLMStep)
         # 在 run 内部触发 on_llm_call / on_tool_call 等细粒度钩子。
         self._hooks: "LifecycleHooks | None" = None
+        # 运行期取消令牌:由 execute 在调用 run 前设置,供容器型 Step(Loop /
+        # Parallel / Condition)在内部边界检查,实现 graceful 取消。
+        self._cancel_token: "CancelToken | None" = None
         # 运行期端口绑定:由 _bind_inputs 在 run 前填充,供 _render 使用。
         self._port_bindings: dict[str, Any] = {}
 
@@ -213,6 +223,22 @@ class BaseStep(ABC):
         """
         self.llm_client = client
 
+    def bind_blocking_executor(self, executor: Any) -> None:
+        """注入 :class:`~agentkit.runtime.blocking.BlockingExecutor` 引用(可选)。
+
+        由 Workflow 在执行前调用(可选,P0 阶段 Workflow 不主动调用,留扩展点)。
+        默认仅存到 ``self._blocking_executor``;容器型 Step 重写以递归传播给
+        子 Step。ToolStep 取执行器时优先用此值,为 None 时回落到全局单例
+        :func:`agentkit.runtime.blocking.get_blocking_executor`。
+
+        未来多工作流并行隔离场景可经此方法注入 per-Workflow 的执行器实例;
+        P0 阶段不注入,所有 ToolStep 共享全局单例,行为等价。
+
+        Args:
+            executor: BlockingExecutor 实例;None 表示不注入(用全局单例)。
+        """
+        self._blocking_executor = executor
+
     @abstractmethod
     async def run(self, ctx: "Context") -> "Context":
         """执行核心逻辑(子类实现)。
@@ -235,6 +261,7 @@ class BaseStep(ABC):
         hooks: "LifecycleHooks | None" = None,
         *,
         retry_policy: RetryPolicy | None = None,
+        cancel_token: "CancelToken | None" = None,
     ) -> StepTrace:
         """通用执行编排:钩子 / 超时 / 执行级重试 / trace 记录。
 
@@ -253,6 +280,8 @@ class BaseStep(ABC):
             hooks:        生命周期钩子(可选)。
             retry_policy: 调用方传入的重试策略;与 ``self.retry`` 的优先级为
                           ``self.retry`` 优先,为 None 时回落到本参数。
+            cancel_token: 协作式取消令牌(可选);容器型 Step 在内部边界检查,
+                          叶子 Step 仅透传不检查。
 
         Returns:
             StepTrace: 本次执行的轨迹。
@@ -268,8 +297,9 @@ class BaseStep(ABC):
         if hooks:
             await hooks.before_step(self, ctx)
 
-        # 1b) 暴露 hooks 给子类 run 使用(LLMStep 据此触发 on_llm_call 等)
+        # 1b) 暴露 hooks / cancel_token 给子类 run 使用
         self._hooks = hooks
+        self._cancel_token = cancel_token
 
         # 1c) 输入端口绑定：校验来源值存在性与类型（声明端口时生效）
         self._bind_inputs(ctx)

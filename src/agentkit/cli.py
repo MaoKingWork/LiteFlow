@@ -1,10 +1,11 @@
 """cli —— AgentKit 命令行入口。
 
-提供四个子命令:
+提供五个子命令:
     - ``run``:       运行工作流 YAML
     - ``validate``:  静态校验工作流 YAML
     - ``dry-run``:   生成执行计划(不实际运行)
     - ``mcp``:       MCP Server 健康检查
+    - ``serve``:     启动可视化服务(FastAPI + SSE)
 
 使用 argparse(标准库),无额外依赖。
 
@@ -14,6 +15,7 @@
     agentkit validate workflow.yaml
     agentkit dry-run workflow.yaml
     agentkit mcp health-check
+    agentkit serve --dir ./workflows --port 8000
 """
 
 from __future__ import annotations
@@ -204,6 +206,63 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# serve 子命令
+# ---------------------------------------------------------------------------
+def _cmd_serve(args: argparse.Namespace) -> int:
+    """启动可视化服务(FastAPI + uvicorn)。
+
+    流程:
+        1. 把 CLI 参数覆盖写入 config(``server_host`` / ``server_port`` /
+           ``server_token`` / ``server_cors_origins``)
+        2. 懒加载 :func:`agentkit.server.app.create_app` 与 ``uvicorn``
+        3. 构造 app + 从 config 读取最终 settings,启动 uvicorn
+
+    Args:
+        args: argparse Namespace,含 ``dir`` / ``host`` / ``port`` / ``token`` /
+              ``cors_origins``。
+
+    Returns:
+        int: 退出码。``1`` 表示依赖缺失或启动失败;``0`` 表示正常退出。
+    """
+    from agentkit.config import set_default
+
+    # 覆盖 config(仅覆盖显式指定的参数,None 保留 config 默认)
+    if args.host is not None:
+        set_default("server_host", args.host)
+    if args.port is not None:
+        set_default("server_port", args.port)
+    if args.token is not None:
+        set_default("server_token", args.token)
+    if args.cors_origins:
+        set_default("server_cors_origins", list(args.cors_origins))
+
+    # 懒加载 server.app
+    try:
+        from agentkit.server.app import create_app
+    except ImportError as e:
+        print(f"错误: {e}", file=sys.stderr)
+        return 1
+
+    # 懒加载 uvicorn
+    try:
+        import uvicorn
+    except ImportError:
+        print(
+            "错误: 需要 uvicorn: pip install agentkit[server]",
+            file=sys.stderr,
+        )
+        return 1
+
+    from agentkit.server.settings import ServerSettings
+
+    app = create_app(args.dir)
+    settings = ServerSettings.from_config()
+    # uvicorn.run 阻塞直到进程退出;host/port 以 config 最终值为准
+    uvicorn.run(app, host=settings.host, port=settings.port)
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # 主入口
 # ---------------------------------------------------------------------------
 def main(argv: list[str] | None = None) -> int:
@@ -248,6 +307,27 @@ def main(argv: list[str] | None = None) -> int:
     p_mcp.add_argument("subcmd", choices=["health-check"], help="MCP 子命令")
     p_mcp.add_argument("--yaml-path", default=None, help="工作流 YAML 文件路径")
 
+    # serve
+    p_serve = subparsers.add_parser("serve", help="启动可视化服务")
+    p_serve.add_argument(
+        "--dir", default=".", help="工作流 YAML 目录(默认当前目录)"
+    )
+    p_serve.add_argument(
+        "--host", default=None, help="绑定地址(默认 127.0.0.1)"
+    )
+    p_serve.add_argument(
+        "--port", type=int, default=None, help="端口(默认 8000)"
+    )
+    p_serve.add_argument(
+        "--token", default=None, help="鉴权 bearer token(为空时仅允许本地访问)"
+    )
+    p_serve.add_argument(
+        "--cors-origins",
+        action="append",
+        default=[],
+        help="CORS 允许的 origin(可多次指定;不指定则关闭 CORS)",
+    )
+
     args = parser.parse_args(argv)
 
     if args.command is None:
@@ -262,6 +342,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_dry_run(args)
     elif args.command == "mcp":
         return _cmd_mcp(args)
+    elif args.command == "serve":
+        return _cmd_serve(args)
 
     parser.print_help()
     return 0

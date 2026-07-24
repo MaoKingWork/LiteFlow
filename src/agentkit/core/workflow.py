@@ -22,13 +22,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from agentkit.config import get_default
-from agentkit.core.checkpoint import Checkpoint, CheckpointStore, LocalCheckpointStore
+from agentkit.core.checkpoint import Checkpoint, CheckpointStore, LocalCheckpointStore, RunStatus
 from agentkit.core.context import Context
 from agentkit.core.hooks import (
     CompositeHooks,
@@ -39,6 +40,7 @@ from agentkit.core.hooks import (
 from agentkit.steps.base import BaseStep
 
 if TYPE_CHECKING:
+    from agentkit.core.cancel import CancelToken
     from agentkit.llm.base import LLMClient
     from agentkit.mcp.manager import MCPManager
 
@@ -54,7 +56,7 @@ class WorkflowResult:
     Attributes:
         run_id:       运行 id。
         context:      最终上下文。
-        status:       运行状态:``completed`` | ``failed``。
+        status:       运行状态:``completed`` | ``failed`` | ``cancelled``。
         completed_steps: 已完成的 Step id 列表。
         error:        失败时的错误信息。
     """
@@ -145,6 +147,7 @@ class Workflow:
         self,
         inputs: dict[str, Any] | None = None,
         run_id: str | None = None,
+        cancel_token: "CancelToken | None" = None,
     ) -> WorkflowResult:
         """从起点执行工作流。
 
@@ -152,11 +155,18 @@ class Workflow:
         失败时保存失败状态检查点并返回 ``status="failed"``。
 
         Args:
-            inputs: 输入变量 dict,每个 key-value 通过 ``ctx.set`` 写入上下文。
-            run_id: 自定义运行 id;``None`` 时自动生成。
+            inputs:       输入变量 dict,每个 key-value 通过 ``ctx.set`` 写入上下文。
+            run_id:       自定义运行 id;``None`` 时自动生成。
+            cancel_token: 协作式取消令牌(可选);提供后在 step 边界检查令牌,
+                          实现 graceful 取消。immediate 取消由调用方通过
+                          ``asyncio.Task.cancel()`` 注入 CancelledError,
+                          ``_execute`` 显式捕获并落盘。``None`` 时行为完全同现状。
 
         Returns:
             WorkflowResult: 运行结果。
+
+        Raises:
+            asyncio.CancelledError: immediate 取消模式下,落盘后重抛。
         """
         # 创建检查点
         checkpoint = Checkpoint.new(self.name, run_id)
@@ -167,24 +177,30 @@ class Workflow:
             for key, value in inputs.items():
                 ctx.set(key, value)
 
-        return await self._execute(ctx, checkpoint)
+        return await self._execute(ctx, checkpoint, cancel_token=cancel_token)
 
     # ------------------------------------------------------------------
     # resume —— 断点续传
     # ------------------------------------------------------------------
-    async def resume(self, run_id: str) -> WorkflowResult:
+    async def resume(
+        self,
+        run_id: str,
+        cancel_token: "CancelToken | None" = None,
+    ) -> WorkflowResult:
         """从检查点恢复执行。
 
         加载检查点,恢复上下文,跳过已完成 Step,从失败处重新执行。
 
         Args:
-            run_id: 要恢复的运行 id。
+            run_id:       要恢复的运行 id。
+            cancel_token: 协作式取消令牌(可选),语义同 :meth:`run`。
 
         Returns:
             WorkflowResult: 运行结果。
 
         Raises:
             KeyError: 检查点不存在时。
+            asyncio.CancelledError: immediate 取消模式下,落盘后重抛。
         """
         checkpoint = await self.checkpoint_store.load(run_id)
         if checkpoint is None:
@@ -193,21 +209,32 @@ class Workflow:
         # 恢复上下文
         ctx = Context.restore(checkpoint.context_snapshot)
         # 重置状态为 running
-        checkpoint.status = "running"
+        checkpoint.status = RunStatus.RUNNING
         checkpoint.error = None
 
-        return await self._execute(ctx, checkpoint)
+        return await self._execute(ctx, checkpoint, cancel_token=cancel_token)
 
     # ------------------------------------------------------------------
     # _execute —— 内部执行核心
     # ------------------------------------------------------------------
     async def _execute(
-        self, ctx: Context, checkpoint: Checkpoint
+        self,
+        ctx: Context,
+        checkpoint: Checkpoint,
+        *,
+        cancel_token: "CancelToken | None" = None,
     ) -> WorkflowResult:
         """执行工作流核心逻辑。
 
         管理 MCP 连接生命周期,触发钩子,顺序执行 Step(跳过已完成的),
-        每步保存检查点。
+        每步保存检查点。支持两阶段取消:
+
+            - **graceful**:``cancel_token`` 在每个 step 边界检查,当前 step
+              完成后停止,返回 ``status="cancelled"``。
+            - **immediate**:``asyncio.Task.cancel()`` 注入 ``CancelledError``,
+              本方法显式捕获 → 落盘 ``cancelled`` → 重抛。
+
+        ``cancel_token`` 为 ``None`` 时取消能力完全关闭,行为同现状。
         """
         run_id = checkpoint.run_id
         completed_set = set(checkpoint.completed_steps)
@@ -248,24 +275,45 @@ class Workflow:
                     logger.debug("跳过已完成 Step: %s", step_id)
                     continue
 
+                # graceful 取消:在 step 边界检查令牌
+                if cancel_token is not None and cancel_token.is_cancelled:
+                    checkpoint.status = RunStatus.CANCELLED
+                    checkpoint.context_snapshot = ctx.snapshot()
+                    checkpoint.updated_at = time.time()
+                    await self.checkpoint_store.save(checkpoint)
+                    return WorkflowResult(
+                        run_id=run_id,
+                        context=ctx,
+                        status=RunStatus.CANCELLED,
+                        completed_steps=list(checkpoint.completed_steps),
+                    )
+
                 # 执行 Step
                 try:
-                    await step.execute(ctx, self.hooks)
+                    await step.execute(
+                        ctx, self.hooks, cancel_token=cancel_token
+                    )
+                except asyncio.CancelledError:
+                    # immediate 取消:CancelledError 穿透 step.execute 传播上来
+                    # (CancelledError 是 BaseException 子类,不被 except Exception 捕获)。
+                    # 显式落盘 cancelled 状态后重抛,让 Task 正确终止。
+                    checkpoint.status = RunStatus.CANCELLED
+                    checkpoint.context_snapshot = ctx.snapshot()
+                    checkpoint.updated_at = time.time()
+                    await self.checkpoint_store.save(checkpoint)
+                    raise
                 except Exception as exc:
                     # Step 失败:保存检查点并返回失败结果
-                    checkpoint.status = "failed"
+                    # after_workflow 由 finally 统一调用,此处不再重复
+                    checkpoint.status = RunStatus.FAILED
                     checkpoint.error = f"{type(exc).__name__}: {exc}"
                     checkpoint.context_snapshot = ctx.snapshot()
                     checkpoint.updated_at = time.time()
                     await self.checkpoint_store.save(checkpoint)
-
-                    if self.hooks:
-                        await self.hooks.after_workflow(self, ctx, ctx)
-
                     return WorkflowResult(
                         run_id=run_id,
                         context=ctx,
-                        status="failed",
+                        status=RunStatus.FAILED,
                         completed_steps=list(checkpoint.completed_steps),
                         error=checkpoint.error,
                     )
@@ -277,8 +325,23 @@ class Workflow:
                 checkpoint.updated_at = time.time()
                 await self.checkpoint_store.save(checkpoint)
 
+            # graceful 取消:所有 step 完成后再次检查令牌
+            # (令牌可能在最后一个 step 执行期间被触发,此时无后续 step
+            # 边界能捕获,需在此显式检查,避免误标 completed)
+            if cancel_token is not None and cancel_token.is_cancelled:
+                checkpoint.status = RunStatus.CANCELLED
+                checkpoint.context_snapshot = ctx.snapshot()
+                checkpoint.updated_at = time.time()
+                await self.checkpoint_store.save(checkpoint)
+                return WorkflowResult(
+                    run_id=run_id,
+                    context=ctx,
+                    status=RunStatus.CANCELLED,
+                    completed_steps=list(checkpoint.completed_steps),
+                )
+
             # 全部完成
-            checkpoint.status = "completed"
+            checkpoint.status = RunStatus.COMPLETED
             checkpoint.error = None
             checkpoint.updated_at = time.time()
             await self.checkpoint_store.save(checkpoint)
@@ -286,14 +349,14 @@ class Workflow:
             return WorkflowResult(
                 run_id=run_id,
                 context=ctx,
-                status="completed",
+                status=RunStatus.COMPLETED,
                 completed_steps=list(checkpoint.completed_steps),
             )
         finally:
             # 资源清理:MCP 断开 + (可选)LLM 客户端关闭
             await self._cleanup_resources()
-
-            # after_workflow 钩子
+            # after_workflow 钩子:统一在 finally 调用,确保成功 / 失败 / 取消
+            # 三种路径都只触发一次(修复此前失败路径重复调用的 bug)。
             if self.hooks:
                 await self.hooks.after_workflow(self, ctx, ctx)
 
