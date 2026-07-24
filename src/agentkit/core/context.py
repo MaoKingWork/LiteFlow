@@ -381,6 +381,45 @@ def _to_jsonable(obj: Any) -> Any:
     return {"_type": type(obj).__name__, "_repr": repr(obj)[:200]}
 
 
+def _from_jsonable(obj: Any) -> Any:
+    """递归还原 :func:`_to_jsonable` 产生的类型标记，恢复原始类型。
+
+    与 :func:`_to_jsonable` 互为逆运算，用于 :meth:`Context.restore` 时将
+    JSON 友好结构还原为 Python 原生类型，避免跨 resume 后类型漂移。
+
+    还原规则：
+        - ``{"_type": "set", "_items": [...]}`` → ``set``
+        - ``{"_type": "bytes", "_data": "..."}`` → ``bytes``
+        - ``{"_type": <其他>, "_repr": "..."}`` → 保留为 dict（不可恢复）
+        - 普通 dict / list → 递归处理
+        - 标量（int/float/str/bool/None）→ 原样返回
+
+    注意：若用户数据恰好含有 ``_type`` + ``_items`` / ``_data`` 键名组合，
+    会被误判为类型标记还原。此为 ``_to_jsonable`` 约定的已知限制，实际
+    场景极少冲突。
+    """
+    if obj is None:
+        return None
+    if isinstance(obj, bool):
+        return obj
+    if isinstance(obj, (int, float, str)):
+        return obj
+    if isinstance(obj, dict):
+        _type = obj.get("_type")
+        if _type == "set" and "_items" in obj:
+            return set(_from_jsonable(v) for v in obj["_items"])
+        if _type == "bytes" and "_data" in obj:
+            return obj["_data"].encode("utf-8", errors="replace")
+        if _type is not None and "_repr" in obj:
+            # 不可恢复的自定义类型，保留为 dict
+            return obj
+        # 普通 dict：递归处理 value
+        return {k: _from_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_from_jsonable(v) for v in obj]
+    return obj
+
+
 def to_mutable(obj: Any) -> Any:
     """递归解冻 Context 数据为可变 JSON 友好结构。
 
@@ -567,7 +606,10 @@ class Context:
                 }
             else:
                 store_snap[key] = _to_jsonable(val)
-        meta = [_trace_to_dict(t) for t in self._traces]
+        # meta（StepTrace）经 _trace_to_dict 转 dict 后，仍可能含 set/frozenset
+        # 等不可 JSON 序列化的值（如 tool_calls.arguments 中的 set），需再经
+        # _to_jsonable 清理，否则 json.dumps 崩溃（LITE-001）。
+        meta = [_to_jsonable(_trace_to_dict(t)) for t in self._traces]
         return {"store": store_snap, "meta": meta}
 
     @classmethod
@@ -597,8 +639,10 @@ class Context:
                     },
                 )
             else:
-                ctx.set(key, val)
-        ctx._traces = list(snapshot.get("meta", []) or [])
+                # _from_jsonable 还原 _to_jsonable 产生的类型标记
+                # （set/frozenset/bytes），避免跨 resume 后类型漂移（LITE-001）。
+                ctx.set(key, _from_jsonable(val))
+        ctx._traces = [_from_jsonable(t) for t in (snapshot.get("meta", []) or [])]
         return ctx
 
 

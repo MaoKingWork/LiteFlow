@@ -7,7 +7,7 @@
     2. 块语法:支持 {{#if expr}}...{{/if}}(含 {{#else}})与
        {{#each list}}...{{/each}} 条件与循环,避免复杂 prompt 只能在 Python
        侧预处理。块内可嵌套,each 循环体可用 {{this}} / {{index}} 引用当前元素。
-    3. 表达式求值:对 {{intent}} == "query" / len('{{ids}}') > 0
+    3. 表达式求值:对 {{intent}} == "query" / len({{ids}}) > 0
        这类布尔/算术表达式求值,供 ConditionStep 的 when 与 {{#if}} 使用。
 
 安全设计:eval_expression 绝不使用 eval,而是把 {{var}} 替换为 Python
@@ -58,6 +58,10 @@ _SINGLE_VAR_PATTERN = re.compile(r"^\s*\{\{\s*([^}]+?)\s*\}\}\s*$")
 _NULL_PATTERN = re.compile(r"\bnull\b")
 _TRUE_PATTERN = re.compile(r"\btrue\b")
 _FALSE_PATTERN = re.compile(r"\bfalse\b")
+# has('key') / has("key"):捕获组 1 为引号,组 2 为 key(可含 {{var}} 模板)。
+# 用反向引用 \1 保证首尾引号一致。在 eval_expression 中先于变量替换处理,
+# 把 has(...) 预渲染为 True/False 字面量,复用既有 ast 白名单求值通路。
+_HAS_PATTERN = re.compile(r"\bhas\(\s*(['\"])([^'\"]+)\1\s*\)")
 # 块语法标签:{{#if EXPR}} / {{#each EXPR}} / {{#else}} / {{/if}} / {{/each}}。
 # 命名组 open / expr / close 便于区分开标签、else、闭标签三类。
 _BLOCK_TAG_PATTERN = re.compile(
@@ -435,27 +439,49 @@ def eval_expression(expr: str, ctx: "Context") -> Any:
     """对表达式求值(用于 ConditionStep 的 when)。
 
     表达式形如:
-        '{{intent}}' == "query"
-        len('{{orders.user_ids}}') > 0
-        '{{x}}' != null
-        '{{count}}' > 3 and '{{count}}' < 10
+        {{intent}} == "query"
+        len({{orders.user_ids}}) > 0
+        {{x}} != null
+        {{count}} > 3 and {{count}} < 10
+        has('chat_v1') and {{count}} > 3
+        has('chat_{{provider}}')
+
+    .. note::
+        ``{{var}}`` 会被替换为变量的 Python 字面量（字符串自动加 ``repr``
+        引号），因此**不要**在 ``{{var}}`` 外面再加引号。写
+        ``'{{status}}' == 'ok'`` 会导致双重引号（``''ok'' == 'ok'``）
+        并抛 ``TemplateError``。正确写法是 ``{{status}} == 'ok'``。
+
+    ``has('key')`` 判断 Context 中是否存在 ``key``(对应 ``ctx.has``),
+    返回 ``True``/``False``。参数可含 ``{{var}}`` 模板(如
+    ``has('chat_{{provider}}')``),会先经 :func:`resolve_template` 渲染再
+    判断存在性;渲染时引用的变量不存在会抛 ``KeyError``(配置错误,不吞掉)。
+    缺失 key 返回 ``False`` 而非抛错。
 
     求值策略:
-        1. 把每个 {{var}} 替换为 _to_literal_str(_resolve_path(var, ctx));
-        2. 把裸 null/true/false 替换为 None/True/False(word boundary);
-        3. 用 ast.parse(expr, mode="eval") 解析;
-        4. 递归访问 AST 节点求值,只放行白名单节点,其他抛 TemplateError。
+        1. 把 has('key') 预渲染为 True/False 字面量(参数含 {{var}} 先渲染);
+        2. 把每个 {{var}} 替换为 _to_literal_str(_resolve_path(var, ctx));
+        3. 把裸 null/true/false 替换为 None/True/False(word boundary);
+        4. 用 ast.parse(expr, mode="eval") 解析;
+        5. 递归访问 AST 节点求值,只放行白名单节点,其他抛 TemplateError。
 
     Raises:
         TemplateError: 表达式包含不支持的节点或语法错误。
         KeyError: 引用的变量不存在。
     """
 
+    def _has_repl(m: re.Match) -> str:
+        # 参数可能含 {{var}} 模板,先用 resolve_template 渲染为实际 key。
+        # 渲染时引用的变量不存在会抛 KeyError(配置错误,不吞掉)。
+        key = resolve_template(m.group(2), ctx)
+        return "True" if ctx.has(key) else "False"
+
     def _var_repl(m: re.Match) -> str:
         path = m.group(1).strip()
         value = _resolve_path(path, ctx)
         return _to_literal_str(value)
 
+    expr = _HAS_PATTERN.sub(_has_repl, expr)
     expr = _VAR_PATTERN.sub(_var_repl, expr)
     expr = _NULL_PATTERN.sub("None", expr)
     expr = _TRUE_PATTERN.sub("True", expr)

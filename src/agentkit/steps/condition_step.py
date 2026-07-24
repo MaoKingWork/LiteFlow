@@ -58,7 +58,7 @@ class ConditionStep(BaseStep):
 
         - id: route
           type: condition
-          when: "'{{intent}}' == 'query'"
+          when: "{{intent}} == 'query'"
           then:
             - id: fetch
               type: tool
@@ -118,6 +118,10 @@ class ConditionStep(BaseStep):
             s.bind_blocking_executor(executor)
         for s in self.else_steps:
             s.bind_blocking_executor(executor)
+
+    def iter_child_steps(self) -> list[BaseStep]:
+        """返回 then + else 子 Step。"""
+        return list(self.then_steps) + list(self.else_steps)
 
     async def run(self, ctx: "Context") -> "Context":
         """求值条件并执行对应分支的子步骤序列。

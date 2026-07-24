@@ -101,6 +101,15 @@ _DEFAULTS: dict[str, Any] = {
     "server_gc_interval_seconds": 6 * 3600,
     # GCSweeper 孤儿文件宽限期（秒，24h）。被 runtime.artifact 使用。
     "server_gc_orphan_grace_seconds": 24 * 3600,
+
+    # ==================== Conversation 会话存储（v0.5 新增）====================
+    # 会话旁路存储根目录。大会话（> large_object_threshold）经 ConversationStore
+    # 落盘到此目录下的 conversations/ 子目录（与 artifacts 平级，便于统一 GC）。
+    # 被 core.conversation.LocalConversationStore 使用。
+    "conversation_store_base_dir": "output/runs",
+    # 会话旁路存储孤儿文件宽限期（秒，24h）。与 server_gc_orphan_grace_seconds 一致。
+    # 被 core.conversation.ConversationGCSweeper（如实现）使用。
+    "conversation_gc_orphan_grace_seconds": 24 * 3600,
 }
 
 
