@@ -86,7 +86,7 @@ class LoopStep(BaseStep):
 
         - id: retry_until_valid
           type: loop
-          until: "'{{validation_pass}}' == true"
+          until: "{{validation_pass}} == true"
           max: 3
           step:
             id: regenerate
@@ -163,6 +163,10 @@ class LoopStep(BaseStep):
         if self.body is not None:
             self.body.bind_blocking_executor(executor)
 
+    def iter_child_steps(self) -> list[BaseStep]:
+        """返回循环体子 Step(如果有)。"""
+        return [self.body] if self.body else []
+
     async def run(self, ctx: "Context") -> "Context":
         """根据模式执行迭代或条件重试。"""
         self._loop_count = 0
@@ -236,7 +240,9 @@ class LoopStep(BaseStep):
                     break
                 ctx.set(self.item_var, item)
                 await self._exec_body(ctx)
-            # body.output 自然保留最后一次写入,无需额外处理
+            # body.output 自然保留最后一次写入；若 loop 显式指定了与 body
+            # 不同的 output，需将最后一条 body 产出同步写入该键（LITE-002）。
+            self._sync_last_output(ctx, out_key, body_out)
         else:  # collect
             collected: list[Any] = []
             for item in items:
@@ -283,11 +289,15 @@ class LoopStep(BaseStep):
             if eval_expression(self.until_expr, ctx):
                 if self.output_mode == "collect" and out_key:
                     ctx.set(out_key, collected)
+                elif self.output_mode == "last":
+                    self._sync_last_output(ctx, out_key, body_out)
                 return
 
         # 达到上限
         if self.output_mode == "collect" and out_key:
             ctx.set(out_key, collected)
+        elif self.output_mode == "last":
+            self._sync_last_output(ctx, out_key, body_out)
         if self.on_max == "fail":
             raise LoopMaxReachedError(
                 f"LoopStep {self.id!r} 达到最大迭代次数 {max_iter} "
@@ -343,6 +353,21 @@ class LoopStep(BaseStep):
         if out_key:
             ctx.set(out_key, acc)
         return acc
+
+    def _sync_last_output(
+        self,
+        ctx: "Context",
+        out_key: str | None,
+        body_out: str | None,
+    ) -> None:
+        """last 模式：若 loop.output 与 body.output 不同，同步 body 最后产出。
+
+        ``last`` 模式依赖 body.output 自然保留最后一次写入。当 loop 显式
+        指定了与 body 不同的 ``output`` 时，需将 body 最后一次产出显式复制
+        到 ``out_key``，否则下游取不到聚合结果（LITE-002）。
+        """
+        if out_key and body_out and out_key != body_out and ctx.has(body_out):
+            ctx.set(out_key, ctx.get(body_out))
 
     # ------------------------------------------------------------------
     # 辅助:执行编排

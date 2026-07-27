@@ -239,6 +239,15 @@ class BaseStep(ABC):
         """
         self._blocking_executor = executor
 
+    def iter_child_steps(self) -> list["BaseStep"]:
+        """返回直接子 Step 列表。叶子 Step 返回空列表。
+
+        组合型 Step(Loop / Parallel / Condition 等)重写此方法,
+        返回其持有的子 Step。静态校验、可视化等通用遍历逻辑
+        只需调用此方法递归,无需按类型 case-by-case 硬编码。
+        """
+        return []
+
     @abstractmethod
     async def run(self, ctx: "Context") -> "Context":
         """执行核心逻辑(子类实现)。
@@ -330,6 +339,12 @@ class BaseStep(ABC):
                 # 捕获 run 抛出的任意异常(网络/瞬时错误等)
                 # 注:CancelledError 是 BaseException 子类,不会被捕获,符合预期
                 last_error = e
+                # 永久错误不重试:异常携带 retryable=False 标志时,
+                # 重试只会浪费成本与延迟(如内容安全拦截、鉴权失败),
+                # 直接跳出重试循环进入钩子决策。
+                # 仅检查属性存在性,不影响现有 Step(无此属性的异常走原有逻辑)。
+                if hasattr(e, "retryable") and not e.retryable:
+                    break
             # 若仍有重试机会,退避后继续
             if attempt < max_attempts - 1:
                 backoff = _compute_backoff(policy, attempt)
@@ -661,10 +676,27 @@ def get_step_type(step_type: str) -> type[BaseStep]:
     return _GLOBAL_STEP_REGISTRY.get(step_type)
 
 
+def walk_all_steps(steps: list[BaseStep]) -> list[BaseStep]:
+    """深度优先遍历 Step 树(含所有嵌套层级)。
+
+    Args:
+        steps: 顶层 Step 列表。
+
+    Returns:
+        list[BaseStep]: 深度优先顺序的所有 Step(含自身与所有子孙)。
+    """
+    result: list[BaseStep] = []
+    for step in steps:
+        result.append(step)
+        result.extend(walk_all_steps(step.iter_child_steps()))
+    return result
+
+
 __all__ = [
     "StepTrace",
     "BaseStep",
     "StepRegistry",
     "register_step",
     "get_step_type",
+    "walk_all_steps",
 ]

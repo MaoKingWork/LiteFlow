@@ -5,6 +5,7 @@
     - LLMStep (type="llm")
     - ToolStep (type="tool")
     - SkillStep (type="skill")
+    - ImageStep (type="image")
     - ParallelStep (type="parallel")
     - ConditionStep (type="condition")
     - LoopStep (type="loop")
@@ -15,6 +16,7 @@ from agentkit.steps.base import BaseStep, StepTrace, get_step_type, register_ste
 from agentkit.steps.llm_step import LLMStep
 from agentkit.steps.tool_step import ToolStep
 from agentkit.steps.skill_step import SkillStep
+from agentkit.steps.image_step import ImageStep
 from agentkit.steps.parallel_step import ParallelStep, ParallelError
 from agentkit.steps.condition_step import ConditionStep
 from agentkit.steps.loop_step import LoopStep, LoopMaxReachedError
@@ -27,6 +29,7 @@ __all__ = [
     "LLMStep",
     "ToolStep",
     "SkillStep",
+    "ImageStep",
     "ParallelStep",
     "ParallelError",
     "ConditionStep",

@@ -101,6 +101,29 @@ _DEFAULTS: dict[str, Any] = {
     "server_gc_interval_seconds": 6 * 3600,
     # GCSweeper 孤儿文件宽限期（秒，24h）。被 runtime.artifact 使用。
     "server_gc_orphan_grace_seconds": 24 * 3600,
+
+    # ==================== Conversation 会话存储（v0.5 新增）====================
+    # 会话旁路存储根目录。大会话（> large_object_threshold）经 ConversationStore
+    # 落盘到此目录下的 conversations/ 子目录（与 artifacts 平级，便于统一 GC）。
+    # 被 core.conversation.LocalConversationStore 使用。
+    "conversation_store_base_dir": "output/runs",
+    # 会话旁路存储孤儿文件宽限期（秒，24h）。与 server_gc_orphan_grace_seconds 一致。
+    # 被 core.conversation.ConversationGCSweeper（如实现）使用。
+    "conversation_gc_orphan_grace_seconds": 24 * 3600,
+
+    # ==================== Image 图片生成（v0.1 新增）====================
+    # 默认图片生成提供商名。被 image.provider.resolve_image_provider 使用,
+    # 当未显式指定提供商时用此值。预设值:"minimax" / "aihubmix" / "stepfun"。
+    "default_image_provider": "minimax",
+    # 图片下载默认保存目录。被 steps.image_step._save_local 使用。
+    # save_local=True 但未指定 output_dir 时用此值。
+    "default_image_download_dir": "output/images",
+    # 图片下载最大字节数（20MB）。被 steps.image_step._save_local 与
+    # image._http.download 使用,防止超大文件撑爆内存。
+    "image_max_download_size": 20 * 1024 * 1024,
+    # 工作空间根目录（路径穿越校验基准）。被 steps.image_step._save_local 使用,
+    # output_dir 必须在此目录内,否则判定为路径穿越攻击。
+    "workspace_root": ".",
 }
 
 
