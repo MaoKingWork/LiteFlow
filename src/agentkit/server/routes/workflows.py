@@ -1,11 +1,14 @@
 """server.routes.workflows —— 工作流 CRUD + 校验 + 内省接口（E1）。
 
 端点:
-    PUT  /api/workflows/{name}        保存定义（YAML 文本 → 文件）
-    POST /api/workflows/validate      校验,返回 diagnostics[]
-    GET  /api/meta/step-types         StepRegistry 全类型 + schema
-    GET  /api/meta/tools              ToolRegistry 全工具 + schema
-    GET  /api/meta/agents             YAML agents 段原文（${ENV} 占位符保留）
+    GET    /api/workflows             工作流列表（名称 + 更新时间）
+    GET    /api/workflows/{name}      读取定义（config JSON + raw YAML 原文）
+    PUT    /api/workflows/{name}      保存定义（YAML 文本 → 文件）
+    DELETE /api/workflows/{name}      删除定义文件
+    POST   /api/workflows/validate    校验,返回 diagnostics[]
+    GET    /api/meta/step-types       StepRegistry 全类型 + schema
+    GET    /api/meta/tools            ToolRegistry 全工具 + schema
+    GET    /api/meta/agents           YAML agents 段原文（${ENV} 占位符保留）
 
 设计原则:
     - 懒加载 fastapi:模块顶层不 import fastapi,仅在工厂函数内导入
@@ -140,6 +143,89 @@ def create_workflow_routes(workflow_dir: str, prefix: str = "/api"):
         ) from e
 
     router = APIRouter(prefix=prefix, tags=["workflows"])
+
+    # ------------------------------------------------------------------
+    # GET /workflows —— 工作流列表
+    # ------------------------------------------------------------------
+    @router.get("/workflows")
+    async def list_workflows():
+        """列出 workflow_dir 下全部工作流 YAML。
+
+        返回 ``{"workflows": [{name, path, updated_at}]}``,
+        ``updated_at`` 为文件 mtime（秒）。``${ENV}`` 占位符不在此解析。
+        """
+        items = []
+        pattern = os.path.join(workflow_dir, "*.yaml")
+        for filepath in sorted(glob.glob(pattern)):
+            name = os.path.splitext(os.path.basename(filepath))[0]
+            if not _NAME_PATTERN.match(name):
+                continue
+            try:
+                mtime = os.path.getmtime(filepath)
+            except OSError:
+                continue
+            items.append({"name": name, "path": filepath, "updated_at": mtime})
+        return {"workflows": items}
+
+    # ------------------------------------------------------------------
+    # GET /workflows/{name} —— 读取工作流定义
+    # ------------------------------------------------------------------
+    @router.get("/workflows/{name}")
+    async def get_workflow(name: str):
+        """读取指定工作流定义。
+
+        返回 ``{name, config, yaml}``:``config`` 为 ``safe_load`` 后的
+        JSON 同构结构（前端文档模型）,``yaml`` 为文件原文（导出用）。
+        ``${ENV}`` 占位符保留原文,永不回传解析值。
+        """
+        if not _NAME_PATTERN.match(name):
+            raise HTTPException(
+                status_code=400,
+                detail="name 仅允许字母、数字、下划线、横线",
+            )
+        filepath = os.path.join(workflow_dir, f"{name}.yaml")
+        if not os.path.exists(filepath):
+            raise HTTPException(
+                status_code=404,
+                detail=f"工作流 {name!r} 不存在",
+            )
+        import yaml
+
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                raw_yaml = f.read()
+            config = yaml.safe_load(raw_yaml)
+        except (OSError, yaml.YAMLError) as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"工作流文件解析失败: {e}",
+            )
+        if not isinstance(config, dict):
+            raise HTTPException(
+                status_code=400,
+                detail="工作流文件顶层应为 dict",
+            )
+        return {"name": name, "config": config, "yaml": raw_yaml}
+
+    # ------------------------------------------------------------------
+    # DELETE /workflows/{name} —— 删除工作流定义
+    # ------------------------------------------------------------------
+    @router.delete("/workflows/{name}")
+    async def delete_workflow(name: str):
+        """删除指定工作流 YAML 文件。"""
+        if not _NAME_PATTERN.match(name):
+            raise HTTPException(
+                status_code=400,
+                detail="name 仅允许字母、数字、下划线、横线",
+            )
+        filepath = os.path.join(workflow_dir, f"{name}.yaml")
+        if not os.path.exists(filepath):
+            raise HTTPException(
+                status_code=404,
+                detail=f"工作流 {name!r} 不存在",
+            )
+        os.remove(filepath)
+        return {"name": name, "deleted": True}
 
     # ------------------------------------------------------------------
     # PUT /workflows/{name} —— 保存工作流定义

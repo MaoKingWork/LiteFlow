@@ -177,7 +177,30 @@ def create_app(
     async def health():
         return {"status": "ok"}
 
+    # ------------------------------------------------------------------
+    # 静态前端（可视化控制台，挂载于 /；注册在最后，不影响 API 路由匹配）
+    # ------------------------------------------------------------------
+    _mount_static_frontend(app)
+
     return app
+
+
+def _mount_static_frontend(app) -> None:
+    """把 ``server/static/`` 下的可视化前端挂载到 ``/``。
+
+    懒加载 starlette.staticfiles；目录不存在时跳过（如裁剪安装），
+    不影响 API 可用性。``html=True`` 使 ``/`` 直接返回 ``index.html``。
+    """
+    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+    if not os.path.isdir(static_dir):
+        logger.warning("静态前端目录不存在，跳过挂载: %s", static_dir)
+        return
+    try:
+        from starlette.staticfiles import StaticFiles
+    except ImportError:
+        logger.warning("starlette.staticfiles 不可用，跳过静态前端挂载")
+        return
+    app.mount("/", StaticFiles(directory=static_dir, html=True), name="ui")
 
 
 def _register_sse_route(app, run_manager) -> None:

@@ -33,13 +33,17 @@ TERMINAL_TYPES = frozenset({
 def _format_sse(event) -> dict:
     """格式化 RunEvent 为 SSE 事件 dict。
 
+    ``data`` 下发完整事件(RunEvent v1 全字段,对齐 §5.1 契约):
+    前端据此获得 ``step_id`` / ``attempt`` / ``ts`` 以路由 LLM 流与
+    节点着色;纯增量字段,旧客户端仅读 ``payload`` 不受影响。
+
     Returns:
         dict: ``{"event": type, "data": json_str, "id": seq}``。
     """
     try:
-        data = json.dumps(event.payload, default=str, ensure_ascii=False)
+        data = json.dumps(event.to_dict(), default=str, ensure_ascii=False)
     except (TypeError, ValueError):
-        data = json.dumps({"error": "payload 不可序列化"})
+        data = json.dumps({"error": "event 不可序列化"})
     return {
         "event": event.type,
         "data": data,
