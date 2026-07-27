@@ -268,8 +268,8 @@ def _compile_step(
     retry = _parse_retry(step_dict.get("retry"))
     timeout = step_dict.get("timeout")
 
-    # 端口声明编译（llm / tool / skill 支持显式端口）
-    if step_type in ("llm", "tool", "skill"):
+    # 端口声明编译（llm / tool / skill / image 支持显式端口）
+    if step_type in ("llm", "tool", "skill", "image"):
         inputs, outputs_list, strict_scope = _compile_step_ports(step_dict)
     else:
         inputs, outputs_list, strict_scope = [], [], False
@@ -281,6 +281,31 @@ def _compile_step(
             agent = agent_configs[agent_ref]
         else:
             agent = agent_ref
+
+        # 解析 conversation 配置块（v0.5 新增）
+        # 不配置 conversation 时全部走默认值，行为与旧版完全一致（向后兼容）。
+        # key/from 支持 {{var}} 模板，此处原样保留字符串，运行期由 LLMStep 渲染。
+        conv = step_dict.get("conversation")
+        if conv:
+            conv_mode = conv.get("mode")
+            conv_key = conv.get("key")
+            conv_from = conv.get("from")
+            conv_fork_at = conv.get("fork_at", "last")
+            conv_compat = conv.get("compat", "strict")
+        else:
+            conv_mode = None
+            conv_key = None
+            conv_from = None
+            conv_fork_at = "last"
+            conv_compat = "strict"
+
+        # 校验 compat 合法取值（strict / passthrough）
+        if conv_compat not in ("strict", "passthrough"):
+            raise ValueError(
+                f"Step {step_id!r} 的 conversation.compat 仅支持 strict|passthrough，"
+                f"得到 {conv_compat!r}"
+            )
+
         return step_cls(
             id=step_id,
             agent=agent,
@@ -293,6 +318,12 @@ def _compile_step(
             inputs=inputs,
             outputs=outputs_list,
             strict_scope=strict_scope,
+            # 会话参数（v0.5 新增）
+            conversation_mode=conv_mode,
+            conversation_key=conv_key,
+            conversation_from=conv_from,
+            conversation_fork_at=conv_fork_at,
+            conversation_compat=conv_compat,
         )
 
     elif step_type == "tool":
@@ -321,6 +352,32 @@ def _compile_step(
             inputs=inputs,
             outputs=outputs_list,
             strict_scope=strict_scope,
+        )
+
+    elif step_type == "image":
+        # reference_image 支持 str 或 list[str]
+        ref_image = step_dict.get("reference_image")
+        return step_cls(
+            id=step_id,
+            prompt=_step_prompt(step_dict) or "",
+            model=step_dict.get("model"),
+            provider=step_dict.get("provider"),
+            n=int(step_dict.get("n", 1)),
+            size=step_dict.get("size"),
+            aspect_ratio=step_dict.get("aspect_ratio"),
+            quality=step_dict.get("quality"),
+            seed=step_dict.get("seed"),
+            response_format=step_dict.get("response_format", "url"),
+            reference_image=ref_image,
+            save_local=bool(step_dict.get("save_local", False)),
+            output_dir=step_dict.get("output_dir"),
+            output=output,
+            retry=retry,
+            timeout=timeout,
+            inputs=inputs,
+            outputs=outputs_list,
+            strict_scope=strict_scope,
+            extra=step_dict.get("extra"),
         )
 
     elif step_type == "condition":
@@ -503,6 +560,40 @@ def _compile_providers(providers_list: list[dict]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Image Provider 配置解析
+# ---------------------------------------------------------------------------
+def _compile_image_providers(image_providers_dict: dict) -> None:
+    """从 YAML ``image_providers`` 段注册自定义图片生成提供商。
+
+    与 ``_compile_providers``（LLM 提供商）对称。``image_providers`` 段是
+    dict 形式（key 为提供商名），而非 list 形式。
+
+    安全校验由 ``ImageProvider.__post_init__`` 自动执行：
+        - base_url 经 validate_url 校验（scheme + 非私网）
+        - api_key_env 经 validate_api_key_env 正则校验
+        - provider_type 必须为已注册类型
+
+    Args:
+        image_providers_dict: 提供商名 → 配置 dict 的映射。
+    """
+    from agentkit.image.provider import (
+        ImageProvider,
+        register_image_provider,
+    )
+
+    for name, prov_dict in image_providers_dict.items():
+        provider = ImageProvider(
+            name=name,
+            base_url=prov_dict.get("base_url", ""),
+            api_key=prov_dict.get("api_key"),
+            api_key_env=prov_dict.get("api_key_env", ""),
+            model=prov_dict.get("model", ""),
+            provider_type=prov_dict.get("provider_type", "openai"),
+        )
+        register_image_provider(provider)
+
+
+# ---------------------------------------------------------------------------
 # 公开 API
 # ---------------------------------------------------------------------------
 def load_workflow_from_dict(
@@ -529,6 +620,11 @@ def load_workflow_from_dict(
     providers_section = config.get("providers", [])
     if providers_section:
         _compile_providers(providers_section)
+
+    # 1c. 注册图片生成提供商(在编译 Step 之前,确保 ImageStep.provider 可路由)
+    image_providers_section = config.get("image_providers", {})
+    if image_providers_section:
+        _compile_image_providers(image_providers_section)
 
     # 2. 编译 Agent
     agent_configs = _compile_agents(config.get("agents", []))

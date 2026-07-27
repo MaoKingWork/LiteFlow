@@ -145,6 +145,10 @@ class ParallelStep(BaseStep):
         for b in self.branches:
             b.bind_blocking_executor(executor)
 
+    def iter_child_steps(self) -> list[BaseStep]:
+        """返回所有分支子 Step。"""
+        return list(self.branches)
+
     async def run(self, ctx: "Context") -> "Context":
         """并发执行所有分支。"""
         self._branch_statuses = []

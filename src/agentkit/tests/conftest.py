@@ -38,11 +38,20 @@ def _isolate_global_registries():
     snap_agents = dict(_ag._GLOBAL_AGENT_REGISTRY._classes)
     snap_skills = dict(_sr._GLOBAL_SKILL_REGISTRY._manifests)
     snap_default_client = _llm._DEFAULT_CLIENT
+
+    # 图片生成客户端状态快照
+    import agentkit.image as _img
+    snap_img_default = _img._DEFAULT_IMAGE_CLIENT
+    snap_img_cache = dict(_img._PROVIDER_CLIENT_CACHE)
+
     yield
     _tb._GLOBAL_REGISTRY._tools = snap_tools
     _ag._GLOBAL_AGENT_REGISTRY._classes = snap_agents
     _sr._GLOBAL_SKILL_REGISTRY._manifests = snap_skills
     _llm._DEFAULT_CLIENT = snap_default_client
+    _img._DEFAULT_IMAGE_CLIENT = snap_img_default
+    _img._PROVIDER_CLIENT_CACHE.clear()
+    _img._PROVIDER_CLIENT_CACHE.update(snap_img_cache)
 
 
 # ---------------------------------------------------------------------------

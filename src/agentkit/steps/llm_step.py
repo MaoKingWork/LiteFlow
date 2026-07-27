@@ -187,6 +187,12 @@ class LLMStep(BaseStep):
         inputs: list | None = None,
         outputs: list | None = None,
         strict_scope: bool = False,
+        # 会话缓存参数(T3.1:均关键字参数,向后兼容)
+        conversation_mode: str | None = None,
+        conversation_key: str | None = None,
+        conversation_from: str | None = None,
+        conversation_fork_at: str | int = "last",
+        conversation_compat: str = "strict",
     ) -> None:
         super().__init__(
             id=id, output=output, retry=retry, timeout=timeout,
@@ -201,11 +207,22 @@ class LLMStep(BaseStep):
         self.system_override: str | None = system_override
         self.temperature_override: float | None = temperature_override
 
+        # 会话缓存配置(T3.1)
+        self.conversation_mode: str | None = conversation_mode
+        self.conversation_key: str | None = conversation_key
+        self.conversation_from: str | None = conversation_from
+        self.conversation_fork_at: str | int = conversation_fork_at
+        self.conversation_compat: str = conversation_compat
+
         # 运行期 scratch:供 _enrich_trace 回填 trace。在 run() 起始重置,
         # 支持 Step 实例被顺序复用(LoopStep 等场景)。
         self._token_usage_total: int = 0
         self._tool_calls_record: list[dict] = []
         self._last_input_summary: str = ""
+        # 会话缓存命中观测:累计 resp.usage.cached_tokens(T7)
+        self._cached_tokens_total: int = 0
+        # 最近一次 LLM 输出内容(供会话保存时追加 assistant 消息)
+        self._last_llm_content: str = ""
 
     # ------------------------------------------------------------------
     # run —— 子类核心逻辑(execute 负责钩子 / 超时 / 重试 / trace)
@@ -216,24 +233,28 @@ class LLMStep(BaseStep):
         流程:
             1. 重置 trace scratch。
             2. 解析 Agent 配置(实例化 / 合并 skills / 填默认值 / 应用覆盖)。
-            3. 解析 prompt 模板 -> user 消息;解析 system -> system 消息。
+            3. 解析 prompt / system 模板 -> user 消息;解析 system -> system 消息。
+               (conversation_mode 非 None 时按 start/continue/fork 加载会话)
             4. 从 agent.tools 构建 Function Call 工具 schema。
             5. 取 LLM 客户端(注入优先,否则全局默认,均无则抛 RuntimeError)。
             6. Function Call 循环 -> 最终文本 content。
             7. 输出契约保障链 -> (value, error)。
             8. error 非 None 时按 ``on_exhausted`` 决策(raise/default/skip)。
-            9. ``ctx.set(self.output, value)`` 写入结果,返回 ctx。
+            9. ``ctx.set(self.output, value)`` 写入结果。
+            10. conversation_mode 非 None 时 save_conversation 保存会话。
         """
         # 1. 重置 scratch(支持实例顺序复用)
         self._token_usage_total = 0
         self._tool_calls_record = []
         self._last_input_summary = ""
+        self._cached_tokens_total = 0
+        self._last_llm_content = ""
 
         # 2. 解析 Agent 配置
         agent = self._resolve_agent()
 
-        # 3. 解析 prompt / system 模板并组装 messages
-        messages = self._build_messages(agent, ctx)
+        # 3. 解析 prompt / system 模板并组装 messages(含会话加载)
+        messages = self._build_messages_with_conversation(agent, ctx)
 
         # 4. 构建工具 schema
         tools_schema = self._build_tools_schema(agent)
@@ -245,6 +266,8 @@ class LLMStep(BaseStep):
         content = await self._run_function_call_loop(
             messages, tools_schema, agent, client, ctx
         )
+        # 标记契约链前的消息长度(会话保存时排除契约重试追加的消息)
+        fc_end = len(messages)
 
         # 7. 输出契约保障链
         value, error = await self._run_output_contract(
@@ -265,6 +288,21 @@ class LLMStep(BaseStep):
             self._emit_dict_outputs(ctx, value)
         elif self.output:
             ctx.set(self.output, value)
+
+        # 10. 保存会话(T3.6:mode=None 时跳过,零改动)
+        if self.conversation_mode is not None:
+            from agentkit.core.conversation import save_conversation
+            # 保存内容:FC 循环产生的消息 + 最终 assistant 回复;
+            # 契约重试追加的 [assistant(坏输出), user(修复提示)] 不保存
+            # (对齐设计文档 §7.5 / §8.6)。
+            save_messages = messages[:fc_end] + [
+                LLMMessage(role="assistant", content=self._last_llm_content)
+            ]
+            save_conversation(
+                ctx, self._conv_resolved_key, save_messages, agent,
+                cached_tokens_total=self._cached_tokens_total,
+            )
+
         return ctx
 
     # ------------------------------------------------------------------
@@ -330,6 +368,73 @@ class LLMStep(BaseStep):
     # ------------------------------------------------------------------
     # 消息组装
     # ------------------------------------------------------------------
+    def _build_system_message(
+        self, agent: AgentConfig, ctx: "Context"
+    ) -> LLMMessage | None:
+        """构建 system 消息(提取自 _build_messages,供会话模式复用)。
+
+        ``self.system_override`` 优先,否则 ``agent.system``;非空时
+        经 ``resolve_template`` 解析 ``{{var}}`` / ``${ENV}``。
+        """
+        system_tpl = (
+            self.system_override if self.system_override is not None else agent.system
+        )
+        if system_tpl:
+            system_text = self._render_str(system_tpl, ctx)
+            if system_text:
+                return LLMMessage(role="system", content=system_text)
+        return None
+
+    def _build_user_message(
+        self, agent: AgentConfig, ctx: "Context"
+    ) -> LLMMessage:
+        """构建 user 消息(提取自 _build_messages,供会话模式复用)。
+
+        ``self.prompt`` 为 ``str`` 时经 ``resolve_value`` 解析后 ``str()`` 化;
+        为 ``list[dict]`` 时(多模态),逐个 content part 递归解析
+        ``{{var}}`` / ``${ENV}``,保持 list 顺序原样作为 user 消息 content。
+        同时记录 input_summary 供 trace。
+        """
+        if isinstance(self.prompt, list):
+            # 多模态:逐个 content part 解析模板变量(叠加端口作用域)
+            user_content: str | list[dict] = [
+                _resolve_content_part(part, lambda t: self._render(t, ctx))
+                for part in self.prompt
+            ]
+            # input_summary:拼接所有 text part 供 trace
+            text_parts = [
+                p.get("text", "")
+                for p in user_content
+                if isinstance(p, dict) and p.get("type") == "text"
+            ]
+            self._last_input_summary = self._summarize(" ".join(text_parts))
+            return LLMMessage(role="user", content=user_content)
+        else:
+            user_raw = self._render(self.prompt, ctx)
+            user_content_str = user_raw if isinstance(user_raw, str) else str(user_raw)
+            self._last_input_summary = self._summarize(user_content_str)
+            return LLMMessage(role="user", content=user_content_str)
+
+    def _render_prompt(self, agent: AgentConfig, ctx: "Context") -> str:
+        """渲染 prompt 模板为字符串(供 fork 模式的 new_prompt 参数)。
+
+        多模态 prompt 取所有 text part 拼接;纯文本 prompt 经 ``resolve_value``
+        解析后 ``str()`` 化。
+        """
+        if isinstance(self.prompt, list):
+            parts = [
+                _resolve_content_part(part, lambda t: self._render(t, ctx))
+                for part in self.prompt
+            ]
+            text_parts = [
+                p.get("text", "")
+                for p in parts
+                if isinstance(p, dict) and p.get("type") == "text"
+            ]
+            return " ".join(text_parts)
+        user_raw = self._render(self.prompt, ctx)
+        return user_raw if isinstance(user_raw, str) else str(user_raw)
+
     def _build_messages(
         self, agent: AgentConfig, ctx: "Context"
     ) -> list[LLMMessage]:
@@ -344,38 +449,75 @@ class LLMStep(BaseStep):
         同时记录 input_summary 供 trace。
         """
         messages: list[LLMMessage] = []
-
-        # system 消息（始终返回 str，用 _render_str 叠加端口作用域）
-        system_tpl = (
-            self.system_override if self.system_override is not None else agent.system
-        )
-        if system_tpl:
-            system_text = self._render_str(system_tpl, ctx)
-            if system_text:
-                messages.append(LLMMessage(role="system", content=system_text))
-
-        # user 消息:str 或 list[dict](多模态)
-        if isinstance(self.prompt, list):
-            # 多模态:逐个 content part 解析模板变量（叠加端口作用域）
-            user_content: str | list[dict] = [
-                _resolve_content_part(part, lambda t: self._render(t, ctx))
-                for part in self.prompt
-            ]
-            messages.append(LLMMessage(role="user", content=user_content))
-            # input_summary:拼接所有 text part 供 trace
-            text_parts = [
-                p.get("text", "")
-                for p in user_content
-                if isinstance(p, dict) and p.get("type") == "text"
-            ]
-            self._last_input_summary = self._summarize(" ".join(text_parts))
-        else:
-            user_raw = self._render(self.prompt, ctx)
-            user_content_str = user_raw if isinstance(user_raw, str) else str(user_raw)
-            messages.append(LLMMessage(role="user", content=user_content_str))
-            self._last_input_summary = self._summarize(user_content_str)
-
+        system_msg = self._build_system_message(agent, ctx)
+        if system_msg is not None:
+            messages.append(system_msg)
+        messages.append(self._build_user_message(agent, ctx))
         return messages
+
+    def _build_messages_with_conversation(
+        self, agent: AgentConfig, ctx: "Context"
+    ) -> list[LLMMessage]:
+        """按 conversation mode 加载/构建消息(T3.3)。
+
+        mode=None 时走原 _build_messages(零改动);
+        mode=start 时构建 [system, user],末尾 save 覆盖;
+        mode=continue 时 load_and_validate + 追加 user;
+        mode=fork 时 load_and_validate + fork_at_user 分支。
+
+        渲染 key/from 一次,暂存 _conv_resolved_key 供 save 复用。
+        同时把历史 meta.cached_tokens 累计到 _cached_tokens_total
+        (T7:跨 continue/fork 轮次叠加)。
+        """
+        from agentkit.core.conversation import (
+            fork_at_user,
+            load_and_validate,
+        )
+
+        mode = self.conversation_mode
+        if mode is None:
+            return self._build_messages(agent, ctx)
+
+        # 渲染模板化 key/from(与 prompt 同一模板引擎)
+        key = (
+            self._render_str(self.conversation_key, ctx)
+            if self.conversation_key
+            else self.id
+        )
+        from_key = self.conversation_from
+        if from_key:
+            from_key = self._render_str(from_key, ctx)
+        else:
+            from_key = key
+        # 暂存供 save_conversation 复用(避免二次渲染)
+        self._conv_resolved_key = key
+        self._conv_resolved_from = from_key
+
+        if mode == "start":
+            # 走原 _build_messages,末尾 save_conversation 覆盖
+            return self._build_messages(agent, ctx)
+
+        if mode == "continue":
+            loaded, meta = load_and_validate(
+                ctx, from_key, agent, self.conversation_compat,
+                system_override=self.system_override is not None,
+            )
+            # 累计历史 cached_tokens(T7:跨轮叠加)
+            self._cached_tokens_total += int(meta.get("cached_tokens", 0))
+            user_msg = self._build_user_message(agent, ctx)
+            return loaded + [user_msg]
+
+        if mode == "fork":
+            loaded, meta = load_and_validate(
+                ctx, from_key, agent, self.conversation_compat,
+                system_override=self.system_override is not None,
+            )
+            # 累计历史 cached_tokens
+            self._cached_tokens_total += int(meta.get("cached_tokens", 0))
+            prompt = self._render_prompt(agent, ctx)
+            return fork_at_user(loaded, self.conversation_fork_at, prompt or None)
+
+        raise ValueError(f"不支持的 conversation.mode: {mode!r}")
 
     # ------------------------------------------------------------------
     # 工具 schema 构建
@@ -784,6 +926,11 @@ class LLMStep(BaseStep):
         )
         # 累计 token 用量(供 _enrich_trace 回填 trace.token_usage)
         self._token_usage_total += int(resp.usage.total_tokens)
+        # 累计 cached_tokens(T7 可观测性:会话缓存命中)
+        if resp.usage and resp.usage.cached_tokens:
+            self._cached_tokens_total += resp.usage.cached_tokens
+        # 记录最近一次 LLM 输出(供会话保存时追加 assistant 消息)
+        self._last_llm_content = resp.content or ""
         # 触发 on_llm_call 钩子(供 LoggingHooks / TokenAccountingHooks 计量)
         # execute 在调 run 前已把 hooks 写入 self._hooks;此处直接复用。
         hooks = self._hooks
@@ -884,6 +1031,11 @@ class LLMStep(BaseStep):
         )
         # 累计 token 用量 + 触发 on_llm_call(与非流式路径统一)
         self._token_usage_total += int(usage.total_tokens)
+        # 累计 cached_tokens(T7 可观测性:会话缓存命中)
+        if usage and usage.cached_tokens:
+            self._cached_tokens_total += usage.cached_tokens
+        # 记录最近一次 LLM 输出(供会话保存时追加 assistant 消息)
+        self._last_llm_content = resp.content or ""
         if hooks is not None:
             await hooks.on_llm_call(agent, messages, resp, usage)
         return resp

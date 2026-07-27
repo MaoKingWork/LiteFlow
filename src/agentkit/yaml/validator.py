@@ -34,7 +34,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from agentkit.steps.base import _GLOBAL_STEP_REGISTRY
+from agentkit.steps.base import BaseStep, _GLOBAL_STEP_REGISTRY
 from agentkit.tools.base import list_tools
 from agentkit.skill.registry import list_skills
 
@@ -684,3 +684,96 @@ def _extract_template_vars(text: str) -> set[str]:
         name = match.group(1).split(".")[0]
         names.add(name)
     return names
+
+
+# ---------------------------------------------------------------------------
+# 会话静态校验（基于 walk_all_steps 通用遍历,不依赖手写类型枚举）
+# ---------------------------------------------------------------------------
+def _validate_conversation_keys(steps: list[BaseStep]) -> None:
+    """校验 conversation.key 不与任何 Step 的 output 重名。
+
+    含 ``{{`` 的模板 key 跳过字面碰撞检查(运行期才确定,且与静态 output 名
+    同名的概率极低),改由运行时 ``_type`` 标记兜底(unpack_conversation
+    失败即报错)。
+
+    Args:
+        steps: 顶层 Step 列表(已编译的 BaseStep 实例树)。
+
+    Raises:
+        ValueError: conversation.key 与某 Step output 重名。
+    """
+    from agentkit.steps.base import walk_all_steps
+
+    all_steps = walk_all_steps(steps)
+    output_keys: set[str] = set()
+    conv_keys: set[str] = set()
+
+    for step in all_steps:
+        # 收集所有 output 端口名
+        for port in getattr(step, "outputs", []):
+            output_keys.add(port.name)
+        # 也收集单 output 的名字(step.output)
+        if getattr(step, "output", None):
+            output_keys.add(step.output)
+        # 收集 conversation_key(跳过模板)
+        if hasattr(step, "conversation_key") and step.conversation_key:
+            k = step.conversation_key
+            if "{{" in k:
+                continue  # 模板 key:跳过字面碰撞检查
+            conv_keys.add(k)
+
+    collisions = output_keys & conv_keys
+    if collisions:
+        raise ValueError(
+            f"conversation.key 与 Step output 重名: {collisions}。"
+            f"请使用不同的键名避免数据覆盖。"
+        )
+
+
+def _validate_condition_branch_consistency(steps: list[BaseStep]) -> None:
+    """校验 condition 分支中 conversation 配置的一致性约束。
+
+    当 then/else 两侧均含 conversation 配置时,校验:
+        - conversation.key 必须相同(操作同一会话)。
+        - output 必须相同(写入同一变量)。
+
+    这约束了"start/continue 分支必须保持等价"这个语义不变量,防止只改
+    一个分支导致首轮与后续轮次行为不一致。prompt 和 agent 允许不同
+    (start 是"创作第1章",continue 是"续写")。
+
+    Args:
+        steps: 顶层 Step 列表(已编译的 BaseStep 实例树)。
+
+    Raises:
+        ValueError: then/else 分支 conversation.key 或 output 不一致。
+    """
+    from agentkit.steps.base import walk_all_steps
+    from agentkit.steps.condition_step import ConditionStep
+
+    for step in walk_all_steps(steps):
+        if not isinstance(step, ConditionStep):
+            continue
+        then_convs = [s for s in step.then_steps
+                      if hasattr(s, "conversation_key") and s.conversation_key]
+        else_convs = [s for s in step.else_steps
+                      if hasattr(s, "conversation_key") and s.conversation_key]
+        if not then_convs or not else_convs:
+            continue  # 只有一侧有 conversation,不约束
+
+        then_keys = {s.conversation_key for s in then_convs}
+        else_keys = {s.conversation_key for s in else_convs}
+        if then_keys != else_keys:
+            raise ValueError(
+                f"ConditionStep {step.id!r} 的 then/else 分支 "
+                f"conversation.key 不一致: then={then_keys}, else={else_keys}。"
+                f"分支两侧必须操作同一会话。"
+            )
+
+        then_outs = {s.output for s in then_convs if getattr(s, "output", None)}
+        else_outs = {s.output for s in else_convs if getattr(s, "output", None)}
+        if then_outs and else_outs and then_outs != else_outs:
+            raise ValueError(
+                f"ConditionStep {step.id!r} 的 then/else 分支 "
+                f"output 不一致: then={then_outs}, else={else_outs}。"
+                f"分支两侧必须写入同一 output 变量。"
+            )
