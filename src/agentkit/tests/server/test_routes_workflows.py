@@ -8,6 +8,9 @@
     - GET meta/step-types → 类型 + 字段 schema + 容器字段
     - GET meta/tools → 工具 + role/execution/param_model_schema
     - GET meta/agents → ${ENV} 保留
+    - GET workflows → 列表(名称/路径/mtime)
+    - GET workflows/{name} → config JSON + yaml 原文(${ENV} 保留)
+    - DELETE workflows/{name} → 文件删除;不存在 → 404
 """
 from __future__ import annotations
 
@@ -278,3 +281,86 @@ def test_meta_agents_empty(tmp_path):
     resp = client.get("/api/meta/agents")
     assert resp.status_code == 200
     assert resp.json()["agents"] == []
+
+
+# ---------------------------------------------------------------------------
+# GET /workflows —— 列表
+# ---------------------------------------------------------------------------
+def test_list_workflows(tmp_path):
+    """列出目录下全部 .yaml,含 name/path/updated_at;非法名跳过。"""
+    (tmp_path / "wf_a.yaml").write_text("name: wf_a\nsteps: []\n", encoding="utf-8")
+    (tmp_path / "wf_b.yaml").write_text("name: wf_b\nsteps: []\n", encoding="utf-8")
+    (tmp_path / "bad.name.yaml").write_text("name: bad\nsteps: []\n", encoding="utf-8")
+    (tmp_path / "other.txt").write_text("ignored", encoding="utf-8")
+    client = _make_app(str(tmp_path))
+    resp = client.get("/api/workflows")
+    assert resp.status_code == 200
+    items = resp.json()["workflows"]
+    names = [i["name"] for i in items]
+    assert names == ["wf_a", "wf_b"]  # 排序 + 非法名/非 yaml 排除
+    for i in items:
+        assert "path" in i and "updated_at" in i
+
+
+def test_list_workflows_empty(tmp_path):
+    """空目录 → 空列表。"""
+    client = _make_app(str(tmp_path))
+    resp = client.get("/api/workflows")
+    assert resp.status_code == 200
+    assert resp.json()["workflows"] == []
+
+
+# ---------------------------------------------------------------------------
+# GET /workflows/{name} —— 读取
+# ---------------------------------------------------------------------------
+def test_get_workflow(tmp_path):
+    """返回 config(JSON 同构) + yaml 原文;${ENV} 占位符保留。"""
+    (tmp_path / "wf.yaml").write_text(
+        "name: wf\n"
+        "steps:\n"
+        "  - type: llm\n"
+        "    id: s1\n"
+        "    agent: a\n"
+        "agents:\n"
+        "  - name: a\n"
+        "    provider: deepseek\n"
+        "    api_key: ${MY_KEY}\n",
+        encoding="utf-8",
+    )
+    client = _make_app(str(tmp_path))
+    resp = client.get("/api/workflows/wf")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["name"] == "wf"
+    assert data["config"]["steps"][0]["id"] == "s1"
+    assert "${MY_KEY}" in data["yaml"]
+    assert data["config"]["agents"][0]["api_key"] == "${MY_KEY}"
+
+
+def test_get_workflow_not_found(tmp_path):
+    """不存在 → 404。"""
+    client = _make_app(str(tmp_path))
+    resp = client.get("/api/workflows/nope")
+    assert resp.status_code == 404
+
+
+def test_get_workflow_bad_name(tmp_path):
+    """非法名 → 400。"""
+    client = _make_app(str(tmp_path))
+    resp = client.get("/api/workflows/bad.name")
+    assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# DELETE /workflows/{name}
+# ---------------------------------------------------------------------------
+def test_delete_workflow(tmp_path):
+    """删除已存在文件 → 200;再删 → 404。"""
+    f = tmp_path / "wf.yaml"
+    f.write_text("name: wf\nsteps: []\n", encoding="utf-8")
+    client = _make_app(str(tmp_path))
+    resp = client.delete("/api/workflows/wf")
+    assert resp.status_code == 200
+    assert resp.json()["deleted"] is True
+    assert not f.exists()
+    assert client.delete("/api/workflows/wf").status_code == 404
