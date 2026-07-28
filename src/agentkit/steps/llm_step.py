@@ -203,7 +203,11 @@ class LLMStep(BaseStep):
         self.prompt: str | list[dict] = prompt
         self.output_format: Literal["text", "json"] = output_format
         self.stream: bool = stream
-        self.llm_client: LLMClient | None = llm_client
+        # 构造器注入存独立属性,避免遮蔽 BaseStep.llm_client(Workflow 经
+        # bind_llm_client 写入的目标)。_get_client 按优先级路由:
+        # _llm_client_override(构造器) > BaseStep.llm_client(Workflow) >
+        # agent.provider > agent.model 反查 > 全局默认。
+        self._llm_client_override: LLMClient | None = llm_client
         self.system_override: str | None = system_override
         self.temperature_override: float | None = temperature_override
 
@@ -560,12 +564,13 @@ class LLMStep(BaseStep):
         """返回生效的 LLM 客户端(按 provider/model 路由)。
 
         路由优先级:
-            1. 注入的 ``self.llm_client`` (测试 / 显式注入)。
-            2. ``agent.provider`` 显式指定:用 ``get_client_for_provider`` 创建
+            1. ``self._llm_client_override``(构造器注入,测试 / 显式注入)。
+            2. ``self.llm_client``(Workflow 经 ``bind_llm_client`` 注入)。
+            3. ``agent.provider`` 显式指定:用 ``get_client_for_provider`` 创建
                并缓存客户端。
-            3. ``agent.model`` 自动反查:通过 ``resolve_provider_by_model`` 查找
+            4. ``agent.model`` 自动反查:通过 ``resolve_provider_by_model`` 查找
                唯一匹配的提供商;命中则用之,歧义(多提供商同模型名)则跳过。
-            4. 全局默认客户端(``get_default_client()``)。
+            5. 全局默认客户端(``get_default_client()``)。
 
         Args:
             agent: 已解析的 Agent 配置(取 provider / model)。
@@ -576,7 +581,11 @@ class LLMStep(BaseStep):
         Raises:
             RuntimeError: 所有路由路径均无可用客户端。
         """
-        # 1. 注入优先
+        # 1. 构造器注入优先(测试 / 显式注入)
+        if self._llm_client_override is not None:
+            return self._llm_client_override
+
+        # 2. Workflow 级注入(bind_llm_client)
         if self.llm_client is not None:
             return self.llm_client
 
@@ -587,16 +596,16 @@ class LLMStep(BaseStep):
         )
         from agentkit.llm.provider import resolve_provider_by_model
 
-        # 2. 显式 provider
+        # 3. 显式 provider
         if agent.provider:
             return get_client_for_provider(agent.provider)
 
-        # 3. 按模型名自动反查提供商
+        # 4. 按模型名自动反查提供商
         matched = resolve_provider_by_model(agent.model)
         if matched:
             return get_client_for_provider(matched)
 
-        # 4. 全局默认
+        # 5. 全局默认
         client = get_default_client()
         if client is None:
             raise RuntimeError(
@@ -1052,3 +1061,5 @@ class LLMStep(BaseStep):
         ``execute`` 私有的 trace 对象。
         """
         trace.token_usage = self._token_usage_total
+        trace.tool_calls = list(self._tool_calls_record)
+        trace.input_summary = self._last_input_summary

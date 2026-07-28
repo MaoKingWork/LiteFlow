@@ -190,6 +190,10 @@ def _mount_static_frontend(app) -> None:
 
     懒加载 starlette.staticfiles；目录不存在时跳过（如裁剪安装），
     不影响 API 可用性。``html=True`` 使 ``/`` 直接返回 ``index.html``。
+
+    另将 ``agentkit/assets/fonts/`` 挂载到 ``/fonts``，供前端
+    ``@font-face`` 加载内嵌字体（OPPO Sans）。``/fonts`` 必须在 ``/``
+    之前注册，否则会被 ``/`` catch-all 吞掉。
     """
     static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
     if not os.path.isdir(static_dir):
@@ -200,6 +204,16 @@ def _mount_static_frontend(app) -> None:
     except ImportError:
         logger.warning("starlette.staticfiles 不可用，跳过静态前端挂载")
         return
+
+    # 字体目录: agentkit/assets/fonts/ (相对于 server/)
+    fonts_dir = os.path.abspath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "assets", "fonts",
+    ))
+    if os.path.isdir(fonts_dir):
+        app.mount("/fonts", StaticFiles(directory=fonts_dir), name="fonts")
+    else:
+        logger.warning("字体目录不存在，跳过 /fonts 挂载: %s", fonts_dir)
+
     app.mount("/", StaticFiles(directory=static_dir, html=True), name="ui")
 
 

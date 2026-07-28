@@ -25,6 +25,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Pt
 
+from agentkit.assets import CODE_FONT, DEFAULT_FONT
 from agentkit.tools.md_convert.base import Block, Converter, parse_html_to_blocks
 
 
@@ -135,10 +136,10 @@ def _add_runs_to_paragraph(paragraph, html: str) -> None:
         if spec.strike:
             run.font.strike = True
         if spec.code:
-            run.font.name = "Courier New"
+            run.font.name = CODE_FONT
             run.font.size = Pt(10)
             # 确保东亚字符也使用等宽字体
-            run._element.rPr.rFonts.set(qn("w:eastAsia"), "Courier New")
+            run._element.rPr.rFonts.set(qn("w:eastAsia"), CODE_FONT)
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +175,46 @@ def _add_horizontal_rule(doc) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 文档默认字体配置
+# ---------------------------------------------------------------------------
+def _apply_font_to_style(style, font_name: str) -> None:
+    """将 ``font_name`` 同时设为样式的 Latin (ascii/hAnsi) 与 CJK (eastAsia) 字体。
+
+    python-docx 的 ``style.font.name`` 仅设置 ``w:ascii`` / ``w:hAnsi``,
+    东亚字符仍会回退到系统默认字体。本函数补设 ``w:eastAsia`` 与 ``w:cs``
+    (复杂文种), 确保 OPPO Sans 覆盖中英文。
+
+    Args:
+        style:      ``docx.styles.style.BaseStyle`` 实例 (如 Normal / Heading 1)。
+        font_name:  字体名 (如 ``"OPPO Sans"``)。
+    """
+    style.font.name = font_name
+    rpr = style._element.get_or_add_rPr()
+    rfonts = rpr.find(qn("w:rFonts"))
+    if rfonts is None:
+        rfonts = OxmlElement("w:rFonts")
+        rpr.insert(0, rfonts)
+    rfonts.set(qn("w:ascii"), font_name)
+    rfonts.set(qn("w:hAnsi"), font_name)
+    rfonts.set(qn("w:eastAsia"), font_name)
+    rfonts.set(qn("w:cs"), font_name)
+
+
+def _configure_document_fonts(doc) -> None:
+    """将文档默认字体 (Normal) 及所有 Heading 样式设为 OPPO Sans。
+
+    List Bullet / List Number 等样式基于 Normal 继承, 无需单独设置。
+    Heading 样式在默认模板中有显式字体, 必须逐个覆盖。
+    """
+    normal = doc.styles["Normal"]
+    _apply_font_to_style(normal, DEFAULT_FONT)
+    for level in range(1, 10):
+        name = f"Heading {level}"
+        if name in [s.name for s in doc.styles]:
+            _apply_font_to_style(doc.styles[name], DEFAULT_FONT)
+
+
+# ---------------------------------------------------------------------------
 # DocxConverter
 # ---------------------------------------------------------------------------
 class DocxConverter(Converter):
@@ -195,6 +236,7 @@ class DocxConverter(Converter):
         """
         blocks = parse_html_to_blocks(html)
         doc = Document()
+        _configure_document_fonts(doc)
         for block in blocks:
             _render_block(doc, block)
         doc.save(str(output_path))
@@ -246,9 +288,9 @@ def _render_code(doc, block: Block) -> None:
     """渲染代码块 (等宽字体 + 灰色背景)。"""
     p = doc.add_paragraph()
     run = p.add_run(block.text)
-    run.font.name = "Courier New"
+    run.font.name = CODE_FONT
     run.font.size = Pt(9)
-    run._element.rPr.rFonts.set(qn("w:eastAsia"), "Courier New")
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), CODE_FONT)
     p.paragraph_format.left_indent = Pt(10)
     _set_paragraph_shading(p, "f6f8fa")
 

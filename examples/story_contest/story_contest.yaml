@@ -1,0 +1,582 @@
+# ============================================================================
+# LiteFlow YAML 工作流最佳实践 —— 故事创作大赛
+# ============================================================================
+# 架构亮点:
+#   1. ParallelStep: 6 位风格迥异的作家同时创作(并发控制)
+#   2. ParallelStep: 3 位评委同时独立打分(总评委 + 技法 + 情感)
+#   3. 加权评分: 总评委 60% + 普通评委平均 40%
+#   4. JSON 结构化输出: 评分结果严格 JSON,确保可编程消费
+#   5. Provider 分层: mimo(创作) vs mimo-json(评审), json_output 强制输出
+#   6. 模板系统: {{var}} / {{#if}} / {{#each}} 动态 Prompt
+#   7. Tool Step: md.convert 一键生成 PDF 文档
+#   8. 温度差异化: 创作型 Agent 高温度(0.7-0.9),评审型 Agent 低温度(0.2)
+# ============================================================================
+
+name: story_contest
+
+# ─── 工作流输入 ───────────────────────────────────────────────────────────────
+inputs:
+  - protagonist    # 主角名字
+  - story_type     # 故事类型(如: 奇幻 / 悬疑 / 科幻 / 言情 / 武侠)
+
+# ─── LLM 提供商配置 ──────────────────────────────────────────────────────────
+# 最佳实践: 按用途拆分 Provider,创作类关闭 JSON 约束,评分类开启 JSON 强制输出
+providers:
+  # 创作用 Provider: 关闭思考链 + 不强制 JSON,释放文学创造力
+  - name: mimo
+    api_key: ${MIMO_API_KEY}
+    model: mimo-v2.5
+    options:
+      thinking: disabled
+      json_output: false
+
+  # 评审用 Provider: 关闭思考链 + 强制 JSON 输出,确保评分结果结构化可靠
+  # 注意: 非预设名称需显式指定 base_url 和 provider_type
+  - name: mimo-json
+    base_url: https://api.xiaomimimo.com/v1
+    provider_type: mimo
+    api_key: ${MIMO_API_KEY}
+    model: mimo-v2.5
+    options:
+      thinking: disabled
+      json_output: true
+
+# ─── Agent 定义(10 个角色) ───────────────────────────────────────────────────
+agents:
+  # ── 角色设计师: 根据输入构建故事基础设定(输出 JSON,用 mimo-json) ──
+  - name: character_designer
+    model: mimo-v2.5
+    provider: mimo-json
+    system: >
+      你是资深文学策划师,擅长为短篇小说构建立体的人物与世界观设定。
+      严格输出 JSON,不要附加任何说明文字或 markdown 代码块。
+    temperature: 0.5
+
+  # ── 6 位风格迥异的作家 ──
+  - name: writer_adventure
+    model: mimo-v2.5
+    provider: mimo
+    system: >
+      你是热血冒险风格的短篇小说家。你的文字节奏明快、冲突强烈、画面感十足,
+      善用短句和动作描写推动情节,让读者肾上腺素飙升。
+      直接输出小说正文,不要附加任何说明。
+    temperature: 0.9
+
+  - name: writer_lyrical
+    model: mimo-v2.5
+    provider: mimo
+    system: >
+      你是细腻抒情风格的短篇小说家。你注重心理刻画、氛围渲染,语言优美如散文诗,
+      善用意象和隐喻,让读者沉浸在情感的海洋中。
+      直接输出小说正文,不要附加任何说明。
+    temperature: 0.8
+
+  - name: writer_humor
+    model: mimo-v2.5
+    provider: mimo
+    system: >
+      你是幽默讽刺风格的短篇小说家。你的文字妙趣横生、金句频出,
+      善用反差、夸张和黑色幽默,让读者在捧腹大笑中体味人生哲理。
+      直接输出小说正文,不要附加任何说明。
+    temperature: 0.9
+
+  - name: writer_suspense
+    model: mimo-v2.5
+    provider: mimo
+    system: >
+      你是悬疑烧脑风格的短篇小说家。你善用伏笔、误导和逻辑推理,
+      结构精巧如迷宫,结局出人意料又在情理之中,让读者拍案叫绝。
+      直接输出小说正文,不要附加任何说明。
+    temperature: 0.7
+
+  - name: writer_philosophical
+    model: mimo-v2.5
+    provider: mimo
+    system: >
+      你是哲理沉思风格的短篇小说家。你的文字充满存在主义思辨与形而上学追问,
+      善用寓言、悖论和意识流,让读者在故事中触摸生命的终极命题。
+      直接输出小说正文,不要附加任何说明。
+    temperature: 0.7
+
+  - name: writer_epic
+    model: mimo-v2.5
+    provider: mimo
+    system: >
+      你是史诗壮阔风格的短篇小说家。你的文字气势磅礴、意境宏大,
+      善用全景式叙事、命运交织与历史纵深感,让读者感受到时代的洪流与英雄的悲壮。
+      直接输出小说正文,不要附加任何说明。
+    temperature: 0.8
+
+  # ── 3 位评委: 总评委(权重60%) + 技法评委 + 情感评委(合计权重40%) ──
+  - name: judge_chief
+    model: mimo-v2.5
+    provider: mimo-json
+    system: >
+      你是文学大赛总评委,拥有最高评审权威。你从整体文学价值、艺术完成度、
+      可读性与传世潜力综合评判,视角全面、标准严苛、一锤定音。
+      严格输出 JSON,不要附加任何说明文字或 markdown 代码块。
+    temperature: 0.1
+
+  - name: judge_craft
+    model: mimo-v2.5
+    provider: mimo-json
+    system: >
+      你是文学技法评审专家,侧重评价: 叙事结构、文笔语言、修辞技巧、节奏把控。
+      你对文字有极高审美标准,关注"怎么写"。
+      严格输出 JSON,不要附加任何说明文字或 markdown 代码块。
+    temperature: 0.2
+
+  - name: judge_emotion
+    model: mimo-v2.5
+    provider: mimo-json
+    system: >
+      你是文学情感评审专家,侧重评价: 情感共鸣、人物塑造、主题深度、创意独特性。
+      你关注作品是否能打动人心,关注"写了什么"和"为何而写"。
+      严格输出 JSON,不要附加任何说明文字或 markdown 代码块。
+    temperature: 0.2
+
+  # ── 报告撰写人: 将评分结果转化为专业 Markdown 报告(自由文本,用 mimo) ──
+  - name: report_writer
+    model: mimo-v2.5
+    provider: mimo
+    system: >
+      你是专业的文学赛事报告撰写人,擅长将结构化评分数据转化为清晰、美观的 Markdown 评审报告。
+      直接输出 Markdown 正文,不要附加任何说明。
+    temperature: 0.3
+
+# ─── 工作流步骤 ───────────────────────────────────────────────────────────────
+steps:
+
+  # ═══ Step 1: 角色与世界设定 ═══════════════════════════════════════════════
+  - id: setup_story
+    type: llm
+    agent: character_designer
+    output_format: json
+    prompt: >
+      请为主角"{{protagonist}}"设计一份{{story_type}}类型的短篇小说设定。
+
+      严格输出如下 JSON(不要 markdown 代码块,不要额外文字):
+
+      {
+        "name": "主角名",
+        "age": 年龄数字,
+        "background": "100字以内的背景设定",
+        "world": "80字以内的世界观概述",
+        "conflict": "核心矛盾冲突(50字以内)",
+        "story_type": "{{story_type}}"
+      }
+    output: story_setup
+
+  # ═══ Step 2: 六位作家并行创作(ParallelStep 展示) ═════════════════════════
+  - id: parallel_writing
+    type: parallel
+    max_concurrency: 6
+    timeout: 360
+    branches:
+      # ── 冒险风格 ──
+      - id: write_adventure
+        type: llm
+        agent: writer_adventure
+        stream: true
+        prompt: >
+          【创作任务】
+
+          主角: {{story_setup.name}},{{story_setup.age}}岁
+          背景: {{story_setup.background}}
+          世界观: {{story_setup.world}}
+          核心冲突: {{story_setup.conflict}}
+          故事类型: {{story_setup.story_type}}
+
+          请以你的热血冒险风格,创作一篇完整的短篇小说。
+
+          要求:
+          - 标题格式: # 冒险之魂
+          - 字数: 800-1200字
+          - 结构完整(开端、发展、高潮、结局)
+          - 只输出小说正文,不要任何说明
+        output: story_adventure
+
+      # ── 抒情风格 ──
+      - id: write_lyrical
+        type: llm
+        agent: writer_lyrical
+        stream: true
+        prompt: >
+          【创作任务】
+
+          主角: {{story_setup.name}},{{story_setup.age}}岁
+          背景: {{story_setup.background}}
+          世界观: {{story_setup.world}}
+          核心冲突: {{story_setup.conflict}}
+          故事类型: {{story_setup.story_type}}
+
+          请以你的细腻抒情风格,创作一篇完整的短篇小说。
+
+          要求:
+          - 标题格式: # 心之所向
+          - 字数: 800-1200字
+          - 结构完整(开端、发展、高潮、结局)
+          - 只输出小说正文,不要任何说明
+        output: story_lyrical
+
+      # ── 幽默风格 ──
+      - id: write_humor
+        type: llm
+        agent: writer_humor
+        stream: true
+        prompt: >
+          【创作任务】
+
+          主角: {{story_setup.name}},{{story_setup.age}}岁
+          背景: {{story_setup.background}}
+          世界观: {{story_setup.world}}
+          核心冲突: {{story_setup.conflict}}
+          故事类型: {{story_setup.story_type}}
+
+          请以你的幽默讽刺风格,创作一篇完整的短篇小说。
+
+          要求:
+          - 标题格式: # 荒诞物语
+          - 字数: 800-1200字
+          - 结构完整(开端、发展、高潮、结局)
+          - 只输出小说正文,不要任何说明
+        output: story_humor
+
+      # ── 悬疑风格 ──
+      - id: write_suspense
+        type: llm
+        agent: writer_suspense
+        stream: true
+        prompt: >
+          【创作任务】
+
+          主角: {{story_setup.name}},{{story_setup.age}}岁
+          背景: {{story_setup.background}}
+          世界观: {{story_setup.world}}
+          核心冲突: {{story_setup.conflict}}
+          故事类型: {{story_setup.story_type}}
+
+          请以你的悬疑烧脑风格,创作一篇完整的短篇小说。
+
+          要求:
+          - 标题格式: # 迷局
+          - 字数: 800-1200字
+          - 结构完整(开端、发展、高潮、结局)
+          - 只输出小说正文,不要任何说明
+        output: story_suspense
+
+      # ── 哲理风格 ──
+      - id: write_philosophical
+        type: llm
+        agent: writer_philosophical
+        stream: true
+        prompt: >
+          【创作任务】
+
+          主角: {{story_setup.name}},{{story_setup.age}}岁
+          背景: {{story_setup.background}}
+          世界观: {{story_setup.world}}
+          核心冲突: {{story_setup.conflict}}
+          故事类型: {{story_setup.story_type}}
+
+          请以你的哲理沉思风格,创作一篇完整的短篇小说。
+
+          要求:
+          - 标题格式: # 存在之轻
+          - 字数: 800-1200字
+          - 结构完整(开端、发展、高潮、结局)
+          - 只输出小说正文,不要任何说明
+        output: story_philosophical
+
+      # ── 史诗风格 ──
+      - id: write_epic
+        type: llm
+        agent: writer_epic
+        stream: true
+        prompt: >
+          【创作任务】
+
+          主角: {{story_setup.name}},{{story_setup.age}}岁
+          背景: {{story_setup.background}}
+          世界观: {{story_setup.world}}
+          核心冲突: {{story_setup.conflict}}
+          故事类型: {{story_setup.story_type}}
+
+          请以你的史诗壮阔风格,创作一篇完整的短篇小说。
+
+          要求:
+          - 标题格式: # 纪元
+          - 字数: 800-1200字
+          - 结构完整(开端、发展、高潮、结局)
+          - 只输出小说正文,不要任何说明
+        output: story_epic
+
+  # ═══ Step 3: 三位评委并行评审(ParallelStep + JSON 结构化输出) ═════════════
+  - id: parallel_judging
+    type: parallel
+    max_concurrency: 3
+    timeout: 240
+    branches:
+      # ── 总评委: 综合文学价值评判（满分60, 权重60%）──
+      - id: judge_chief_scoring
+        type: llm
+        agent: judge_chief
+        output_format: json
+        prompt: >
+          请以总评委身份,从【综合文学价值】角度为以下6篇作品打分。
+      
+          评分维度(每项满分,总分60):
+          - literary_value: 文学价值（满分15）
+          - completeness: 艺术完成度（满分15）
+          - readability: 可读性（满分10）
+          - originality: 原创性（满分10）
+          - potential: 传世潜力（满分10）
+      
+          注意: total 必须是五项之和, 上限60分。
+      
+          【作品A - 热血冒险】
+          {{story_adventure}}
+      
+          【作品B - 细腻抒情】
+          {{story_lyrical}}
+      
+          【作品C - 幽默讽刺】
+          {{story_humor}}
+      
+          【作品D - 悬疑烧脑】
+          {{story_suspense}}
+      
+          【作品E - 哲理沉思】
+          {{story_philosophical}}
+      
+          【作品F - 史诗壮阔】
+          {{story_epic}}
+      
+          严格输出如下 JSON(不要 markdown 代码块):
+          {
+            "scores": {
+              "adventure": {"literary_value": 0, "completeness": 0, "readability": 0, "originality": 0, "potential": 0, "total": 0, "comment": "简评"},
+              "lyrical": {"literary_value": 0, "completeness": 0, "readability": 0, "originality": 0, "potential": 0, "total": 0, "comment": "简评"},
+              "humor": {"literary_value": 0, "completeness": 0, "readability": 0, "originality": 0, "potential": 0, "total": 0, "comment": "简评"},
+              "suspense": {"literary_value": 0, "completeness": 0, "readability": 0, "originality": 0, "potential": 0, "total": 0, "comment": "简评"},
+              "philosophical": {"literary_value": 0, "completeness": 0, "readability": 0, "originality": 0, "potential": 0, "total": 0, "comment": "简评"},
+              "epic": {"literary_value": 0, "completeness": 0, "readability": 0, "originality": 0, "potential": 0, "total": 0, "comment": "简评"}
+            }
+          }
+        output: chief_scores
+      
+      # ── 技法评委: 侧重叙事结构与文笔（满分20, 权重20%）──
+      - id: judge_craft_scoring
+        type: llm
+        agent: judge_craft
+        output_format: json
+        prompt: >
+          请从【文学技法】角度为以下6篇作品打分。
+  
+          评分维度(每项满分,总分20):
+          - narrative_structure: 叙事结构（满分6）
+          - language: 文笔语言（满分6）
+          - pacing: 节奏把控（满分4）
+          - technique: 写作技巧（满分4）
+
+          注意: total 必须是四项之和, 上限20分。
+  
+          【作品A - 热血冒险】
+          {{story_adventure}}
+  
+          【作品B - 细腻拒情】
+          {{story_lyrical}}
+  
+          【作品C - 幽默讽刺】
+          {{story_humor}}
+  
+          【作品D - 悬疑烧脑】
+          {{story_suspense}}
+  
+          【作品E - 哲理沉思】
+          {{story_philosophical}}
+  
+          【作品F - 史诗壮阔】
+          {{story_epic}}
+  
+          严格输出如下 JSON(不要 markdown 代码块):
+          {
+            "scores": {
+              "adventure": {"narrative_structure": 0, "language": 0, "pacing": 0, "technique": 0, "total": 0, "comment": "简评"},
+              "lyrical": {"narrative_structure": 0, "language": 0, "pacing": 0, "technique": 0, "total": 0, "comment": "简评"},
+              "humor": {"narrative_structure": 0, "language": 0, "pacing": 0, "technique": 0, "total": 0, "comment": "简评"},
+              "suspense": {"narrative_structure": 0, "language": 0, "pacing": 0, "technique": 0, "total": 0, "comment": "简评"},
+              "philosophical": {"narrative_structure": 0, "language": 0, "pacing": 0, "technique": 0, "total": 0, "comment": "简评"},
+              "epic": {"narrative_structure": 0, "language": 0, "pacing": 0, "technique": 0, "total": 0, "comment": "简评"}
+            }
+          }
+        output: craft_scores
+  
+      # ── 情感评委: 侧重共鸣与深度（满分20, 权重20%）──
+      - id: judge_emotion_scoring
+        type: llm
+        agent: judge_emotion
+        output_format: json
+        prompt: >
+          请从【情感与深度】角度为以下6篇作品打分。
+      
+          评分维度(每项满分,总分20):
+          - emotional_impact: 情感共鸣（满分6）
+          - characterization: 人物塑造（满分6）
+          - theme_depth: 主题深度（满分4）
+          - creativity: 创意独特性（满分4）
+      
+          注意: total 必须是四项之和, 上限20分。
+  
+          【作品A - 热血冒险】
+          {{story_adventure}}
+  
+          【作品B - 细腻拒情】
+          {{story_lyrical}}
+  
+          【作品C - 幽默讽刺】
+          {{story_humor}}
+  
+          【作品D - 悬疑烧脑】
+          {{story_suspense}}
+  
+          【作品E - 哲理沉思】
+          {{story_philosophical}}
+  
+          【作品F - 史诗壮阔】
+          {{story_epic}}
+  
+          严格输出如下 JSON(不要 markdown 代码块):
+          {
+            "scores": {
+              "adventure": {"emotional_impact": 0, "characterization": 0, "theme_depth": 0, "creativity": 0, "total": 0, "comment": "简评"},
+              "lyrical": {"emotional_impact": 0, "characterization": 0, "theme_depth": 0, "creativity": 0, "total": 0, "comment": "简评"},
+              "humor": {"emotional_impact": 0, "characterization": 0, "theme_depth": 0, "creativity": 0, "total": 0, "comment": "简评"},
+              "suspense": {"emotional_impact": 0, "characterization": 0, "theme_depth": 0, "creativity": 0, "total": 0, "comment": "简评"},
+              "philosophical": {"emotional_impact": 0, "characterization": 0, "theme_depth": 0, "creativity": 0, "total": 0, "comment": "简评"},
+              "epic": {"emotional_impact": 0, "characterization": 0, "theme_depth": 0, "creativity": 0, "total": 0, "comment": "简评"}
+            }
+          }
+        output: emotion_scores
+
+  # ═══ Step 4: 汇总评分、选出冠军(LLM只需加法: 总评60+技法20+情感20=满分100) ═══
+  - id: aggregate_results
+    type: llm
+    agent: judge_chief
+    output_format: json
+    prompt: >
+      你是评分汇总员。满分已按权重分配: 总评委60分 + 技法20分 + 情感20分 = 满分100分。
+      每篇作品最终得分 = 总评委total + 技法total + 情感total（直接加,不需要乘权重）。
+  
+      【总评委评分】
+      {{chief_scores}}
+  
+      【技法评委评分】
+      {{craft_scores}}
+  
+      【情感评委评分】
+      {{emotion_scores}}
+  
+      计算规则:
+      - 最终得分 = 总评委total + 技法total + 情感total
+      - 得分最高者为冠军
+  
+      严格输出如下 JSON(不要 markdown 代码块):
+      {
+        "results": [
+          {"style": "adventure", "style_cn": "热血冒险", "chief_total": 0, "craft_total": 0, "emotion_total": 0, "final_score": 0, "chief_comment": "", "craft_comment": "", "emotion_comment": ""},
+          {"style": "lyrical", "style_cn": "细腻抒情", "chief_total": 0, "craft_total": 0, "emotion_total": 0, "final_score": 0, "chief_comment": "", "craft_comment": "", "emotion_comment": ""},
+          {"style": "humor", "style_cn": "幽默讽刺", "chief_total": 0, "craft_total": 0, "emotion_total": 0, "final_score": 0, "chief_comment": "", "craft_comment": "", "emotion_comment": ""},
+          {"style": "suspense", "style_cn": "悬疑烧脑", "chief_total": 0, "craft_total": 0, "emotion_total": 0, "final_score": 0, "chief_comment": "", "craft_comment": "", "emotion_comment": ""},
+          {"style": "philosophical", "style_cn": "哲理沉思", "chief_total": 0, "craft_total": 0, "emotion_total": 0, "final_score": 0, "chief_comment": "", "craft_comment": "", "emotion_comment": ""},
+          {"style": "epic", "style_cn": "史诗壮阔", "chief_total": 0, "craft_total": 0, "emotion_total": 0, "final_score": 0, "chief_comment": "", "craft_comment": "", "emotion_comment": ""}
+        ],
+        "winner": "风格英文key",
+        "winner_cn": "冠军风格中文名",
+        "winner_final_score": 0,
+        "winner_reason": "50字以内的夺冠理由",
+        "scoring_system": "满分归一化: 总评委60分 + 技法20分 + 情感20分 = 满分100"
+      }
+    output: final_results
+
+  # ═══ Step 5: 生成 Markdown 评审报告(含冠军全文) ═══════════════════════════
+  - id: generate_report
+    type: llm
+    agent: report_writer
+    prompt: >
+      请根据以下信息,生成一份完整的 Markdown 格式评审报告。
+  
+      【基础信息】
+      - 主角: {{story_setup.name}}
+      - 故事类型: {{story_setup.story_type}}
+      - 冠军风格: {{final_results.winner_cn}}
+      - 冠军最终得分: {{final_results.winner_final_score}}
+      - 夺冠理由: {{final_results.winner_reason}}
+      - 评分体系: {{final_results.scoring_system}}
+      
+      【所有作品评分】
+      {{final_results.results}}
+      
+      以下是全部六篇作品全文,请根据 winner 字段确定冠军,
+      将冠军作品全文放入报告:
+  
+      【作品A - 热血冒险】
+      {{story_adventure}}
+  
+      【作品B - 细腻拒情】
+      {{story_lyrical}}
+  
+      【作品C - 幽默讽刺】
+      {{story_humor}}
+  
+      【作品D - 悬疑烧脑】
+      {{story_suspense}}
+  
+      【作品E - 哲理沉思】
+      {{story_philosophical}}
+  
+      【作品F - 史诗壮阔】
+      {{story_epic}}
+  
+      报告格式要求(Markdown):
+  
+      # 「{{protagonist}}」{{story_type}}故事创作大赛评审报告
+  
+      ## 大赛概况
+      (简述参赛规则、评委构成、加权评分公式)
+  
+      ## 评分总览
+      (保留评分表中的 Markdown 表格,并补充排名与冠军标识)
+  
+      ## 冠军作品:「冠军标题」
+      ### 最终得分: X 分
+      ### 夺冠理由
+      (详细理由)
+      ### 作品全文
+      (完整输出冠军小说正文)
+  
+      ## 评委点评
+      ### 总评委
+      (对冠军的点评)
+      ### 技法评委
+      (对冠军的点评)
+      ### 情感评委
+      (对冠军的点评)
+  
+      ## 所有参赛作品评分明细
+      (每位评委对每篇作品的评分与简评)
+  
+      只输出 Markdown 报告正文,不要附加说明。
+    output: report_markdown
+
+  # ═══ Step 6: 转换为 PDF 文档(Tool Step 展示) ══════════════════════════════
+  - id: export_pdf
+    type: tool
+    tool: md.convert
+    params:
+      content: "{{report_markdown}}"
+      formats:
+        - pdf
+      output_dir: ./output
+      output_name: "{{protagonist}}_story_contest_report"
+    output: pdf_result

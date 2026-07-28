@@ -18,20 +18,24 @@
         <b>LiteFlow</b><span class="lf-logo-sub">Studio</span>
       </span>
       <span id="wf-name" class="lf-wf-name mono">—</span>
-      <span id="wf-dirty" class="lf-dirty-dot" title="有未保存修改" hidden>●</span>
+      <span id="wf-dirty" class="lf-dirty-dot" data-i18n-title="topbar.dirty" hidden>●</span>
     </div>
     <div class="lf-topbar-actions">
-      <button id="btn-validate" class="lf-btn" title="静态校验 (Ctrl+Shift+V)">校验</button>
-      <button id="btn-save" class="lf-btn lf-btn-primary" title="保存 (Ctrl+S)">保存</button>
+      <button id="btn-validate" class="lf-btn" data-i18n="topbar.validate" data-i18n-title="topbar.validateTitle">校验</button>
+      <button id="btn-save" class="lf-btn lf-btn-primary" data-i18n="topbar.save" data-i18n-title="topbar.saveTitle">保存</button>
       <span class="lf-topbar-sep"></span>
-      <button id="btn-import" class="lf-btn" title="导入 YAML / JSON">导入</button>
-      <button id="btn-export" class="lf-btn" title="导出 YAML">导出</button>
+      <button id="btn-import" class="lf-btn" data-i18n="topbar.import" data-i18n-title="topbar.importTitle">导入</button>
+      <button id="btn-export" class="lf-btn" data-i18n="topbar.export" data-i18n-title="topbar.exportTitle">导出</button>
       <span class="lf-topbar-sep"></span>
-      <button id="btn-run" class="lf-btn lf-btn-run" title="运行当前工作流">
+      <button id="btn-run" class="lf-btn lf-btn-run" data-i18n-title="topbar.runTitle">
         <svg viewBox="0 0 24 24" width="12" height="12"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
-        运行
+        <span data-i18n="topbar.run">运行</span>
       </button>
-      <span id="conn-status" class="lf-conn" title="服务连接状态"></span>
+      <select id="lang-switch" class="lf-lang-switch" data-i18n-title="topbar.langTitle">
+        <option value="zh">中文</option>
+        <option value="en">English</option>
+      </select>
+      <span id="conn-status" class="lf-conn"></span>
     </div>
   </header>
 
@@ -40,13 +44,13 @@
     <aside class="lf-sidebar">
       <section class="lf-side-section">
         <div class="lf-side-head">
-          <span>工作流</span>
-          <button id="btn-new-wf" class="lf-icon-btn" title="新建工作流">＋</button>
+          <span data-i18n="sidebar.workflows">工作流</span>
+          <button id="btn-new-wf" class="lf-icon-btn" data-i18n-title="sidebar.newWorkflow">＋</button>
         </div>
         <div id="wf-list" class="lf-wf-list"></div>
       </section>
       <section class="lf-side-section lf-side-grow">
-        <div class="lf-side-head"><span>节点</span></div>
+        <div class="lf-side-head"><span data-i18n="sidebar.nodes">节点</span></div>
         <div id="palette" class="lf-palette"></div>
       </section>
     </aside>
@@ -59,10 +63,10 @@
     <!-- ══════════ 右栏:属性 / 运行 / 产物 / 诊断 ══════════ -->
     <aside class="lf-right">
       <nav class="lf-tabs">
-        <button class="lf-tab is-active" data-tab="props">属性</button>
-        <button class="lf-tab" data-tab="run">运行</button>
-        <button class="lf-tab" data-tab="artifacts">产物</button>
-        <button class="lf-tab" data-tab="diag">诊断<span id="diag-badge" class="lf-badge" hidden></span></button>
+        <button class="lf-tab is-active" data-tab="props" data-i18n="tab.props">属性</button>
+        <button class="lf-tab" data-tab="run" data-i18n="tab.run">运行</button>
+        <button class="lf-tab" data-tab="artifacts" data-i18n="tab.artifacts">产物</button>
+        <button class="lf-tab" data-tab="diag"><span data-i18n="tab.diag">诊断</span><span id="diag-badge" class="lf-badge" hidden></span></button>
       </nav>
       <div class="lf-tabpanes">
         <section id="pane-props" class="lf-pane is-active"></section>
@@ -80,7 +84,7 @@
       <div class="lf-modal-head">
         <span id="modal-title" class="lf-modal-title mono"></span>
         <div class="lf-modal-actions" id="modal-actions"></div>
-        <button class="lf-icon-btn" data-close title="关闭">✕</button>
+        <button class="lf-icon-btn" data-close data-i18n-title="topbar.close">✕</button>
       </div>
       <div id="modal-body" class="lf-modal-body"></div>
     </div>

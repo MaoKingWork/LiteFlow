@@ -448,12 +448,18 @@ def _compile_step(
 def _compile_agents(agents_list: list[dict]) -> dict[str, AgentConfig]:
     """从 YAML ``agents`` 段构造 AgentConfig 实例字典。
 
+    有 ``skills`` 字段时调用 ``apply_skills_to_agent`` 合并配置(system/tools/
+    output_model/max_tool_iterations/mcp),使 LLMStep 拿到的 AgentConfig 已是
+    合并后的最终值(LLMStep 对 AgentConfig 实例不自动合并 skills)。
+
     Args:
         agents_list: Agent 配置 dict 列表。
 
     Returns:
         dict[str, AgentConfig]: agent name → AgentConfig 实例。
     """
+    from agentkit.skill.merger import apply_skills_to_agent
+
     configs: dict[str, AgentConfig] = {}
     for agent_dict in agents_list:
         name = agent_dict.get("name", "")
@@ -463,7 +469,7 @@ def _compile_agents(agents_list: list[dict]) -> dict[str, AgentConfig]:
         om_schema = agent_dict.get("output_model")
         if om_schema and isinstance(om_schema, dict):
             output_model = _schema_to_model(f"{name}_output", om_schema)
-        configs[name] = AgentConfig(
+        agent = AgentConfig(
             name=name,
             model=agent_dict.get("model", "gpt-4o-mini"),
             provider=agent_dict.get("provider"),
@@ -472,8 +478,14 @@ def _compile_agents(agents_list: list[dict]) -> dict[str, AgentConfig]:
             temperature=float(agent_dict.get("temperature", 0.2)),
             tools=agent_dict.get("tools", []),
             mcp=agent_dict.get("mcp", []),
+            skills=agent_dict.get("skills", []),
             max_tool_iterations=int(agent_dict.get("max_tool_iterations", 0)),
         )
+        # 有 skills 时合并配置。需 Skill 已加载到 SkillRegistry,
+        # 故 load_workflow_from_dict 中 Skill 加载须先于 Agent 编译。
+        if agent.skills:
+            agent = apply_skills_to_agent(agent)
+        configs[name] = agent
     return configs
 
 
@@ -626,10 +638,8 @@ def load_workflow_from_dict(
     if image_providers_section:
         _compile_image_providers(image_providers_section)
 
-    # 2. 编译 Agent
-    agent_configs = _compile_agents(config.get("agents", []))
-
-    # 3. 加载 Skill
+    # 2. 加载 Skill(须先于 Agent 编译,使 _compile_agents 中
+    # apply_skills_to_agent 能从 SkillRegistry 取到已加载的 Skill)
     skills_section = config.get("skills", [])
     if skills_section:
         from pathlib import Path
@@ -646,6 +656,9 @@ def load_workflow_from_dict(
                 parent = str(skill_full_path.parent)
                 name = skill_full_path.name
                 SkillLoader(parent).load(name)
+
+    # 3. 编译 Agent(有 skills 时 apply_skills_to_agent 合并配置)
+    agent_configs = _compile_agents(config.get("agents", []))
 
     # 4. 配置 MCP
     mcp_manager = None

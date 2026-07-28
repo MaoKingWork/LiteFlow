@@ -8,53 +8,68 @@
 import { el, replaceChildren, fmtDateTime } from './util.js';
 import { emit } from './store.js';
 import { TYPE_COLORS } from './canvas.js';
+import { t, onLocaleChange } from './i18n.js';
 
 const MIME_NEW = 'application/x-lf-new';
 
-/* 容器类型标注(展示用) */
-const KIND_LABEL = { condition: '分支', loop: '循环', parallel: '并发' };
+/* 容器类型标注键(展示用) */
+const KIND_KEY = { condition: 'palette.kind.condition', loop: 'palette.kind.loop', parallel: 'palette.kind.parallel' };
 
 export function createPalette({ listEl, paletteEl }) {
+  // 缓存最近一次渲染数据,供语言切换时重渲染
+  let lastWorkflows = null;
+  let lastActiveName = null;
+  let lastStepTypes = null;
+
   /** 渲染工作流列表。 */
   function renderWorkflows(workflows, activeName) {
+    lastWorkflows = workflows;
+    lastActiveName = activeName;
     replaceChildren(listEl,
       (workflows || []).map((wf) =>
         el(`div.lf-wf-item${wf.name === activeName ? '.is-active' : ''}`, {
           onclick: () => emit('wf:open', wf.name),
         },
-          el('span.lf-wf-item-name', { title: `${wf.name}\n更新于 ${fmtDateTime(wf.updated_at)}` }, wf.name),
+          el('span.lf-wf-item-name', { title: `${wf.name}\n${t('palette.updatedAt', { time: fmtDateTime(wf.updated_at) })}` }, wf.name),
           el('button.lf-icon-btn', {
-            title: '删除',
+            title: t('palette.delete'),
             onclick: (e) => { e.stopPropagation(); emit('wf:delete', wf.name); },
           }, '🗑'),
         ),
       ),
-      workflows?.length ? null : el('div.lf-empty-hint', {}, '暂无工作流', el('br'), '点 ＋ 新建或导入'),
+      workflows?.length ? null : el('div.lf-empty-hint', {}, t('palette.noWorkflows'), el('br'), t('palette.noWorkflowsHint')),
     );
   }
 
   /** 渲染节点面板(内省 step-types 驱动)。 */
   function renderPalette(stepTypes) {
+    lastStepTypes = stepTypes;
     replaceChildren(paletteEl,
-      (stepTypes || []).map((t) => {
-        const color = TYPE_COLORS[t.name] || '#98989D';
+      (stepTypes || []).map((st) => {
+        const color = TYPE_COLORS[st.name] || '#98989D';
         return el('div.lf-pal-item', {
           draggable: 'true',
           style: `--node-c:${color}`,
-          title: `点击添加到画布,或拖入指定位置\n字段: ${(t.fields || []).map((f) => f.name).join(', ')}`,
-          onclick: () => emit('pal:add', t.name),
+          title: t('palette.itemTitle', { fields: (st.fields || []).map((f) => f.name).join(', ') }),
+          onclick: () => emit('pal:add', st.name),
           ondragstart: (e) => {
-            e.dataTransfer.setData(MIME_NEW, t.name);
+            e.dataTransfer.setData(MIME_NEW, st.name);
             e.dataTransfer.effectAllowed = 'copy';
           },
         },
           el('span.lf-pal-dot'),
-          el('span.lf-pal-name', {}, t.name),
-          KIND_LABEL[t.name] ? el('span.lf-pal-kind', {}, KIND_LABEL[t.name]) : null,
+          el('span.lf-pal-name', {}, st.name),
+          KIND_KEY[st.name] ? el('span.lf-pal-kind', {}, t(KIND_KEY[st.name])) : null,
         );
       }),
     );
   }
+
+  // 语言切换时按缓存数据重渲染
+  onLocaleChange(() => {
+    if (lastStepTypes) renderPalette(lastStepTypes);
+    if (lastWorkflows) renderWorkflows(lastWorkflows, lastActiveName);
+  });
 
   return { renderWorkflows, renderPalette };
 }

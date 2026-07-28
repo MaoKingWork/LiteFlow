@@ -13,10 +13,12 @@ import { createProperties } from './properties.js';
 import { createRunner } from './runner.js';
 import { createArtifacts } from './artifacts.js';
 import { createDiagnostics } from './diagnostics.js';
+import { t, getLocale, setLocale, applyToDOM, onLocaleChange } from './i18n.js';
 
 /* ── 应用状态 ─────────────────────────────────────────────────── */
 const state = {
   name: null,            // 当前工作流名(= 文件名)
+  unsavedName: null,     // 导入未保存时的展示名(本地草稿)
   docModel: null,        // 文档模型(JSON)
   dirty: false,
   schemas: {},           // step type -> {fields, container_fields}
@@ -44,11 +46,19 @@ async function withAuth(fn) {
     return await fn();
   } catch (e) {
     if (e.status !== 401) throw e;
-    const t = window.prompt('Server 需要访问令牌(AGENTKIT_SERVER_TOKEN):');
-    if (t == null) throw e;
-    api.setToken(t.trim());
+    const token = window.prompt(t('prompt.token'));
+    if (token == null) throw e;
+    api.setToken(token.trim());
     return await fn(); // 重试一次
   }
+}
+
+/* ── 工作流名展示(随语言变化的部分本地化) ───────────────────── */
+function renderWfName() {
+  const el = $('#wf-name');
+  if (state.name) el.textContent = state.name;
+  else if (state.unsavedName) el.textContent = t('prompt.nameUnsaved', { name: state.unsavedName });
+  else el.textContent = t('prompt.untitledUnsaved');
 }
 
 /* ── 文档加载 / 渲染 ──────────────────────────────────────────── */
@@ -76,9 +86,10 @@ async function openWorkflow(name) {
   try {
     const data = await withAuth(() => api.getWorkflow(name));
     state.name = name;
+    state.unsavedName = null;
     state.docModel = doc.normalize(data.config);
     state.selection = { path: null, step: null };
-    $('#wf-name').textContent = name;
+    renderWfName();
     setDirty(false);
     renderCanvas();
     renderProps();
@@ -87,7 +98,7 @@ async function openWorkflow(name) {
     diag.render({ is_valid: true, diagnostics: [] });
     await refreshWorkflowList();
   } catch (e) {
-    toast(`打开失败: ${e.message}`, 'err');
+    toast(t('toast.openFailed', { msg: e.message }), 'err');
   }
 }
 
@@ -107,36 +118,37 @@ async function saveCurrent() {
   try {
     await withAuth(() => api.saveWorkflow(state.name, state.docModel));
     setDirty(false);
-    toast('已保存', 'ok');
+    toast(t('toast.saved'), 'ok');
     refreshWorkflowList();
     return true;
   } catch (e) {
     if (e.status === 400 && e.body?.diagnostics) {
       diag.render(e.body);
       switchTab('diag');
-      toast('保存被拒绝:校验未通过', 'err');
+      toast(t('toast.saveRejected'), 'err');
     } else {
-      toast(`保存失败: ${e.message}`, 'err');
+      toast(t('toast.saveFailed', { msg: e.message }), 'err');
     }
     return false;
   }
 }
 
 async function saveAsNew() {
-  const name = window.prompt('新工作流名称(字母/数字/_/-):', state.docModel?.name || 'untitled');
+  const name = window.prompt(t('prompt.newName'), state.docModel?.name || 'untitled');
   if (!name) return false;
-  if (!/^[A-Za-z0-9_-]+$/.test(name)) { toast('名称仅允许字母、数字、_、-', 'err'); return false; }
+  if (!/^[A-Za-z0-9_-]+$/.test(name)) { toast(t('prompt.nameRule'), 'err'); return false; }
   state.docModel.name = name;
   state.name = name;
-  $('#wf-name').textContent = name;
+  state.unsavedName = null;
+  renderWfName();
   try {
     await withAuth(() => api.saveWorkflow(name, state.docModel));
     setDirty(false);
-    toast('已创建', 'ok');
+    toast(t('toast.created'), 'ok');
     refreshWorkflowList();
     return true;
   } catch (e) {
-    toast(`创建失败: ${e.message}`, 'err');
+    toast(t('toast.createFailed', { msg: e.message }), 'err');
     return false;
   }
 }
@@ -144,7 +156,7 @@ async function saveAsNew() {
 /** runner 启动前置:有脏改动时引导先保存(run 绑定文件快照)。 */
 async function ensureSaved() {
   if (!state.dirty && state.name) return true;
-  if (!window.confirm('运行以服务端保存的文件为准。先保存当前修改?')) return !!state.name && !state.dirty;
+  if (!window.confirm(t('prompt.saveBeforeRun'))) return !!state.name && !state.dirty;
   return await saveCurrent();
 }
 
@@ -154,19 +166,19 @@ async function validateCurrent() {
     const report = await withAuth(() => api.validateWorkflow(state.docModel));
     const errs = diag.render(report);
     switchTab('diag');
-    toast(errs ? `发现 ${errs} 个错误` : '校验通过', errs ? 'err' : 'ok');
+    toast(errs ? t('toast.errorsFound', { n: errs }) : t('toast.valid'), errs ? 'err' : 'ok');
   } catch (e) {
-    toast(`校验失败: ${e.message}`, 'err');
+    toast(t('toast.validateFailed', { msg: e.message }), 'err');
   }
 }
 
 async function exportYaml() {
-  if (!state.name) { toast('请先保存工作流', 'err'); return; }
+  if (!state.name) { toast(t('toast.saveFirst'), 'err'); return; }
   try {
     const data = await withAuth(() => api.getWorkflow(state.name));
     download(`${state.name}.yaml`, data.yaml, 'text/yaml;charset=utf-8');
   } catch (e) {
-    toast(`导出失败: ${e.message}`, 'err');
+    toast(t('toast.exportFailed', { msg: e.message }), 'err');
   }
 }
 
@@ -178,13 +190,14 @@ async function importFile(file) {
       const parsed = JSON.parse(text);
       state.docModel = doc.normalize(parsed);
       state.name = null; // 走另存流程,避免覆盖同名文件
-      $('#wf-name').textContent = `${name} (未保存)`;
+      state.unsavedName = name;
+      renderWfName();
       setDirty(true);
       renderCanvas(); renderProps(); runner.reset(); artifacts.reset();
-      toast('已导入 JSON,保存后生效', 'ok');
+      toast(t('toast.importJson'), 'ok');
     } else {
       await withAuth(() => api.putWorkflowYaml(name, text));
-      toast(`已导入为 ${name}`, 'ok');
+      toast(t('toast.importedAs', { name }), 'ok');
       await openWorkflow(name);
     }
   } catch (e) {
@@ -192,28 +205,28 @@ async function importFile(file) {
       diag.render(e.body);
       switchTab('diag');
     }
-    toast(`导入失败: ${e.message}`, 'err');
+    toast(t('toast.importFailed', { msg: e.message }), 'err');
   }
 }
 
 /* ── 工作流操作意图(store 事件) ─────────────────────────────── */
 on('wf:open', async (name) => {
-  if (state.dirty && !confirmDanger('当前有未保存修改,切换将丢失。继续?')) return;
+  if (state.dirty && !confirmDanger(t('prompt.dirtySwitch'))) return;
   await openWorkflow(name);
 });
 
 on('wf:delete', async (name) => {
-  if (!confirmDanger(`确认删除工作流 "${name}"?该操作不可恢复。`)) return;
+  if (!confirmDanger(t('prompt.confirmDelete', { name }))) return;
   try {
     await withAuth(() => api.deleteWorkflow(name));
-    toast(`已删除 ${name}`, 'ok');
+    toast(t('toast.deleted', { name }), 'ok');
     if (state.name === name) { state.name = null; state.docModel = null; }
     const data = await withAuth(() => api.listWorkflows());
     palette.renderWorkflows(data.workflows || [], null);
     if (data.workflows?.length) await openWorkflow(data.workflows[0].name);
     else { newLocalDoc(); }
   } catch (e) {
-    toast(`删除失败: ${e.message}`, 'err');
+    toast(t('toast.deleteFailed', { msg: e.message }), 'err');
   }
 });
 
@@ -283,15 +296,16 @@ $('#import-file').addEventListener('change', async (e) => {
   if (file) await importFile(file);
 });
 $('#btn-new-wf').addEventListener('click', () => {
-  if (state.dirty && !confirmDanger('当前有未保存修改,新建将丢失。继续?')) return;
+  if (state.dirty && !confirmDanger(t('prompt.dirtyNew'))) return;
   newLocalDoc();
 });
 
 function newLocalDoc() {
   state.name = null;
+  state.unsavedName = null;
   state.docModel = doc.createEmpty('untitled');
   state.selection = { path: null, step: null };
-  $('#wf-name').textContent = 'untitled (未保存)';
+  renderWfName();
   setDirty(true);
   renderCanvas(); renderProps(); runner.reset(); artifacts.reset();
   diag.render({ is_valid: true, diagnostics: [] });
@@ -309,6 +323,17 @@ function setConn(ok) {
   $('#conn-status').className = `lf-conn ${ok ? 'is-ok' : 'is-bad'}`;
 }
 
+/* ── 国际化:语言切换器接线 ─────────────────────────────────────── */
+const langSwitch = $('#lang-switch');
+if (langSwitch) {
+  langSwitch.value = getLocale();
+  langSwitch.addEventListener('change', (e) => setLocale(e.target.value));
+}
+// 首次进入:翻译静态 DOM(顶栏 / 侧栏 / 页签等 data-i18n 节点)
+applyToDOM(document);
+// 工作流名展示随语言变化(各模块自管重渲染,这里只补 wf-name)
+onLocaleChange(() => renderWfName());
+
 /* ── 启动 ─────────────────────────────────────────────────────── */
 async function boot() {
   try {
@@ -319,9 +344,9 @@ async function boot() {
     if (e.status === 401) {
       // 触发一次带鉴权的重试
       try { await withAuth(() => api.listWorkflows()); setConn(true); }
-      catch { toast('鉴权失败,请刷新重试', 'err'); return; }
+      catch { toast(t('toast.authFailed'), 'err'); return; }
     } else {
-      toast('无法连接 Server', 'err');
+      toast(t('toast.noServer'), 'err');
       return;
     }
   }
@@ -333,10 +358,10 @@ async function boot() {
       withAuth(() => api.metaTools()),
     ]);
     state.tools = tools.tools || [];
-    for (const t of st.types || []) state.schemas[t.name] = t;
+    for (const typeInfo of st.types || []) state.schemas[typeInfo.name] = typeInfo;
     palette.renderPalette(st.types || []);
   } catch (e) {
-    toast(`内省加载失败: ${e.message}`, 'err');
+    toast(t('toast.metaFailed', { msg: e.message }), 'err');
   }
 
   // 工作流列表 → 打开第一个
@@ -346,7 +371,7 @@ async function boot() {
     if (data.workflows?.length) await openWorkflow(data.workflows[0].name);
     else newLocalDoc();
   } catch (e) {
-    toast(`列表加载失败: ${e.message}`, 'err');
+    toast(t('toast.listFailed', { msg: e.message }), 'err');
     newLocalDoc();
   }
 }

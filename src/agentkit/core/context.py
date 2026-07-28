@@ -292,22 +292,37 @@ class LargeRef:
 # ---------------------------------------------------------------------------
 # 辅助函数：_sizeof / _deep_freeze / _to_jsonable / _trace_to_dict
 # ---------------------------------------------------------------------------
-def _sizeof(obj: Any) -> int:
+def _sizeof(obj: Any, _seen: set[int] | None = None) -> int:
     """递归估算对象总占用字节。
 
     对 dict/list/tuple/set/frozenset 递归累加元素大小；对 str/bytes，
     ``sys.getsizeof`` 已含内容，无需递归；其他类型直接用 ``sys.getsizeof``。
+
+    循环引用保护:``_seen`` 记录已访问对象的 ``id()``,再次遇到时返回 0,
+    避免 ``RecursionError``。调用方无需传参,递归内部自动维护。
     """
     size = sys.getsizeof(obj)
     if isinstance(obj, dict):
-        size += sum(_sizeof(k) + _sizeof(v) for k, v in obj.items())
+        obj_id = id(obj)
+        if _seen is None:
+            _seen = set()
+        if obj_id in _seen:
+            return 0
+        _seen.add(obj_id)
+        size += sum(_sizeof(k, _seen) + _sizeof(v, _seen) for k, v in obj.items())
     elif isinstance(obj, (list, tuple, set, frozenset)):
-        size += sum(_sizeof(item) for item in obj)
+        obj_id = id(obj)
+        if _seen is None:
+            _seen = set()
+        if obj_id in _seen:
+            return 0
+        _seen.add(obj_id)
+        size += sum(_sizeof(item, _seen) for item in obj)
     # str/bytes/其他标量：sys.getsizeof 已足够
     return size
 
 
-def _deep_freeze(obj: Any) -> Any:
+def _deep_freeze(obj: Any, _memo: set[int] | None = None) -> Any:
     """递归冻结对象为不可变结构。
 
     - dict → ``FrozenDict``（递归冻结 value；key 假定已不可变）
@@ -317,6 +332,10 @@ def _deep_freeze(obj: Any) -> Any:
     - 已是 ``FrozenDict`` / ``frozenset`` / ``MappingProxyType`` → 原样返回
     - pydantic ``BaseModel`` 实例 → 原样返回（字段多不可变）
     - 其他对象 → 包装 ``ReadOnlyProxy``
+
+    循环引用保护:``_memo`` 记录正在冻结的容器 ``id()``,检测到循环时
+    回退为 ``ReadOnlyProxy(obj)`` 包装(防止无限递归,保持只读语义)。
+    调用方无需传参,递归内部自动维护。
     """
     if obj is None:
         return None
@@ -328,18 +347,27 @@ def _deep_freeze(obj: Any) -> Any:
         return obj
     if isinstance(obj, MappingProxyType):
         return obj
-    # dict → FrozenDict
-    if isinstance(obj, dict):
-        return FrozenDict({k: _deep_freeze(v) for k, v in obj.items()})
-    # list/tuple → tuple
-    if isinstance(obj, (list, tuple)):
-        return tuple(_deep_freeze(v) for v in obj)
-    # set → frozenset
-    if isinstance(obj, set):
-        return frozenset(_deep_freeze(v) for v in obj)
     # pydantic BaseModel：字段多不可变，视为只读直接返回
     if _BaseModel is not None and isinstance(obj, _BaseModel):
         return obj
+    # 容器类型:检查循环引用
+    if isinstance(obj, (dict, list, tuple, set)):
+        obj_id = id(obj)
+        if _memo is None:
+            _memo = set()
+        if obj_id in _memo:
+            # 检测到循环引用:回退为只读代理,不再递归
+            return ReadOnlyProxy(obj)
+        _memo.add(obj_id)
+        try:
+            if isinstance(obj, dict):
+                return FrozenDict({k: _deep_freeze(v, _memo) for k, v in obj.items()})
+            if isinstance(obj, (list, tuple)):
+                return tuple(_deep_freeze(v, _memo) for v in obj)
+            # set
+            return frozenset(_deep_freeze(v, _memo) for v in obj)
+        finally:
+            _memo.discard(obj_id)
     # 其他对象：包装只读代理
     return ReadOnlyProxy(obj)
 

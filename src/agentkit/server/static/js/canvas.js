@@ -9,6 +9,7 @@
 import { el, replaceChildren, truncate } from './util.js';
 import { emit } from './store.js';
 import * as doc from './doc.js';
+import { t, onLocaleChange } from './i18n.js';
 
 /* step 类型 → 节点色(深色底高饱和,符合 DESIGN.md 氛围) */
 export const TYPE_COLORS = {
@@ -66,7 +67,7 @@ export function createCanvas(container) {
     replaceChildren(container, root);
     if (!currentDoc.steps.length) {
       container.appendChild(el('div.lf-canvas-empty', {},
-        '画布为空', el('br'), '从左侧「节点」面板点击或拖入一个节点开始编排'));
+        t('canvas.empty'), el('br'), t('canvas.emptyHint')));
     }
   }
 
@@ -117,15 +118,15 @@ export function createCanvas(container) {
     const head = el('div.lf-node-head', {},
       el('span.lf-status-dot'),
       el('span.lf-node-badge', {}, type),
-      el('span.lf-node-id', {}, step.id || '(未命名)'),
+      el('span.lf-node-id', {}, step.id || t('canvas.unnamed')),
       step.ui?.note ? el('span.lf-node-note-flag', { title: step.ui.note }, '✎') : null,
       el('span.lf-node-actions', {},
-        isCont ? iconBtn(collapsed ? '▸' : '▾', collapsed ? '展开' : '折叠', (e) => {
+        isCont ? iconBtn(collapsed ? '▸' : '▾', collapsed ? t('canvas.expand') : t('canvas.collapse'), (e) => {
           e.stopPropagation();
           step.ui = { ...(step.ui || {}), collapsed: !collapsed };
           emit('doc', { kind: 'edit' });
         }) : null,
-        iconBtn('✕', '删除节点', (e) => {
+        iconBtn('✕', t('canvas.deleteNode'), (e) => {
           e.stopPropagation();
           doc.removeStep(currentDoc, path);
           if (selection && doc.pathToString(selection) === pathStr) select(null);
@@ -174,14 +175,14 @@ export function createCanvas(container) {
         if (step.step && typeof step.step === 'object') {
           zone.appendChild(renderNode(step.step, [...path, { field: 'step' }]));
         } else {
-          zone.appendChild(el('div.lf-nest-empty', {}, '拖入循环体(单步)'));
+          zone.appendChild(el('div.lf-nest-empty', {}, t('canvas.dropLoopBody')));
           makeDropTarget(zone, path, 'step', 0);
         }
         nest.appendChild(zone);
       } else {
         const zone = el('div.lf-nest-zone');
         const list = Array.isArray(step[cf.name]) ? step[cf.name] : [];
-        if (!list.length) zone.appendChild(el('div.lf-nest-empty', {}, '空分支'));
+        if (!list.length) zone.appendChild(el('div.lf-nest-empty', {}, t('canvas.emptyBranch')));
         zone.appendChild(renderSeq(list, path, cf.name));
         nest.appendChild(zone);
       }
@@ -193,7 +194,7 @@ export function createCanvas(container) {
         col.appendChild(el('div.lf-nest-label', {}, cf.name === 'then' ? '✓ then' : '✗ else'));
         const zone = el('div.lf-nest-zone');
         const list = Array.isArray(step[cf.name]) ? step[cf.name] : [];
-        if (!list.length) zone.appendChild(el('div.lf-nest-empty', {}, '空'));
+        if (!list.length) zone.appendChild(el('div.lf-nest-empty', {}, t('canvas.emptyShort')));
         zone.appendChild(renderSeq(list, path, cf.name));
         col.appendChild(zone);
         cols.appendChild(col);
@@ -267,6 +268,9 @@ export function createCanvas(container) {
   // 点击画布空白 → 选中工作流本身(编辑工作流级配置)
   container.addEventListener('click', () => select(null));
 
+  // 语言切换时按当前文档重绘(文案 / 摘要随语言变化)
+  onLocaleChange(() => { if (currentDoc) draw(); });
+
   return { render, setSelection, applyRunStatus, markDiagnostics, scrollToStep, clearSelection: () => select(null) };
 }
 
@@ -281,7 +285,7 @@ function summaryOf(step) {
     case 'tool': return step.tool ? truncate(JSON.stringify(step.params ?? {}), 90) : '';
     case 'condition': return truncate(step.when || '', 90);
     case 'loop': return `iter: ${truncate(step.iter ?? '', 40)}${step.as ? ` as ${step.as}` : ''}${step.output_mode ? ` · ${step.output_mode}` : ''}`;
-    case 'parallel': return `branches ×${(step.branches || []).length}${step.max_concurrency ? ` · 并发 ${step.max_concurrency}` : ''}`;
+    case 'parallel': return `branches ×${(step.branches || []).length}${step.max_concurrency ? ` · ${t('canvas.concurrency', { n: step.max_concurrency })}` : ''}`;
     case 'skill': return truncate(step.skill || step.name || '', 90);
     case 'image': return truncate(step.prompt || '', 90);
     default: return '';

@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from agentkit.core.cancel import CancelToken
     from agentkit.core.context import Context
     from agentkit.core.hooks import LifecycleHooks
+    from agentkit.llm.base import LLMClient
     from agentkit.mcp.manager import MCPManager
 
 __all__ = ["ConditionStep"]
@@ -155,8 +156,6 @@ class ConditionStep(BaseStep):
         cancel_token: "CancelToken | None" = None,
     ) -> "StepTrace":
         """重写:暂存 hooks / retry_policy / cancel_token,供子步骤 ``execute`` 使用。"""
-        from agentkit.steps.base import StepTrace  # 延迟导入避免循环
-
         self._current_hooks = hooks
         self._current_retry_policy = retry_policy
         self._current_cancel_token = cancel_token

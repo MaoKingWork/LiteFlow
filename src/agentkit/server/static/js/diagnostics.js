@@ -5,10 +5,14 @@
 
 import { el, replaceChildren } from './util.js';
 import { emit } from './store.js';
+import { t, onLocaleChange } from './i18n.js';
 
 export function createDiagnostics({ paneEl, badgeEl }) {
+  let lastReport = null;
+
   /** 渲染校验报告;返回错误数。 */
   function render(report) {
+    lastReport = report;
     const diags = report?.diagnostics || [];
     const errCount = diags.filter((d) => d.severity !== 'warning').length;
 
@@ -19,13 +23,13 @@ export function createDiagnostics({ paneEl, badgeEl }) {
 
     replaceChildren(paneEl,
       el('div.lf-form-sec', {},
-        el('div.lf-form-sec-head', {}, '校验结果'),
+        el('div.lf-form-sec-head', {}, t('diag.title')),
         diags.length === 0
-          ? el('div.lf-diag-ok', {}, '✓ 校验通过,未发现问题')
+          ? el('div.lf-diag-ok', {}, t('diag.ok'))
           : diags.map((d) =>
             el(`div.lf-diag-item.sev-${d.severity || 'error'}`, {
               onclick: () => { if (d.path) emit('diag:goto', d.path); },
-              title: d.path ? '点击定位到节点' : '',
+              title: d.path ? t('diag.clickToLocate') : '',
             },
               el('div.lf-diag-code', {}, d.code || 'error'),
               d.path ? el('div.lf-diag-path', {}, d.path) : null,
@@ -38,6 +42,9 @@ export function createDiagnostics({ paneEl, badgeEl }) {
     emit('diag:paths', diags.map((d) => d.path).filter(Boolean));
     return errCount;
   }
+
+  // 语言切换时按上次报告重渲染
+  onLocaleChange(() => { if (lastReport) render(lastReport); });
 
   return { render };
 }

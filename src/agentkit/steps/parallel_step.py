@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from agentkit.core.cancel import CancelToken
     from agentkit.core.context import Context
     from agentkit.core.hooks import LifecycleHooks
+    from agentkit.llm.base import LLMClient
     from agentkit.mcp.manager import MCPManager
     from agentkit.steps.base import StepTrace
 

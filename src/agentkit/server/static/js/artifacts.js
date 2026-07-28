@@ -7,6 +7,7 @@
 import { el, replaceChildren, fmtBytes, fmtTime, truncate, openModal, download, toast } from './util.js';
 import { on } from './store.js';
 import * as api from './api.js';
+import { t, onLocaleChange } from './i18n.js';
 
 /* content_type → 预览方式 */
 function previewKind(ct = '') {
@@ -45,10 +46,10 @@ export function createArtifacts({ paneEl }) {
   function render() {
     replaceChildren(paneEl,
       el('div.lf-form-sec', {},
-        el('div.lf-form-sec-head', {}, `产物${runId ? ` · ${runId}` : ''}`,
-          runId ? el('button.lf-icon-btn', { title: '刷新', onclick: () => loadRun(runId) }, '⟳') : null),
-        !runId ? el('div.lf-empty-hint', {}, '在「运行」页选择一个 run 查看产物')
-          : items.length === 0 ? el('div.lf-empty-hint', {}, '该 run 暂无产物')
+        el('div.lf-form-sec-head', {}, runId ? t('artifacts.titleWithRun', { runId }) : t('artifacts.title'),
+          runId ? el('button.lf-icon-btn', { title: t('artifacts.refresh'), onclick: () => loadRun(runId) }, '⟳') : null),
+        !runId ? el('div.lf-empty-hint', {}, t('artifacts.selectRun'))
+          : items.length === 0 ? el('div.lf-empty-hint', {}, t('artifacts.noArtifacts'))
           : el('div.lf-art-list', {}, items.map(renderItem)),
       ),
     );
@@ -64,8 +65,8 @@ export function createArtifacts({ paneEl }) {
           `${a.step_id || '?'} · ${a.content_type || '?'} · ${fmtBytes(a.size)} · md5 ${truncate(a.md5, 8)}${a.ts ? ' · ' + fmtTime(a.ts) : ''}`),
         a.summary ? el('div.lf-art-meta', { title: a.summary }, truncate(a.summary, 60)) : null,
       ),
-      el('button.lf-btn', { onclick: () => preview(a) }, '预览'),
-      el('button.lf-btn', { onclick: () => downloadArtifact(a), title: '下载' }, '⬇'),
+      el('button.lf-btn', { onclick: () => preview(a) }, t('artifacts.preview')),
+      el('button.lf-btn', { onclick: () => downloadArtifact(a), title: t('artifacts.downloadTitle') }, '⬇'),
     );
   }
 
@@ -77,7 +78,7 @@ export function createArtifacts({ paneEl }) {
       const typed = blob.type ? blob : new Blob([blob], { type: a.content_type || 'application/octet-stream' });
       const actions = [el('button.lf-btn', {
         onclick: () => download(a.id, typed, typed.type),
-      }, '⬇ 下载')];
+      }, t('artifacts.download'))];
 
       if (kind === 'html' || kind === 'pdf' || kind === 'image') {
         const url = URL.createObjectURL(typed);
@@ -96,12 +97,12 @@ export function createArtifacts({ paneEl }) {
       } else {
         openModal({
           title: a.id,
-          body: el('div.lf-empty-hint', {}, `暂不支持预览 ${a.content_type || '该类型'},请下载查看`),
+          body: el('div.lf-empty-hint', {}, t('artifacts.unsupportedPreview', { type: a.content_type || t('artifacts.unsupportedType') })),
           actions,
         });
       }
     } catch (e) {
-      toast(`预览失败: ${e.message}`, 'err');
+      toast(t('toast.previewFailed', { msg: e.message }), 'err');
     }
   }
 
@@ -110,11 +111,14 @@ export function createArtifacts({ paneEl }) {
       const blob = await api.fetchArtifactBlob(runId, a.id);
       download(a.id, blob, a.content_type || 'application/octet-stream');
     } catch (e) {
-      toast(`下载失败: ${e.message}`, 'err');
+      toast(t('toast.downloadFailed', { msg: e.message }), 'err');
     }
   }
 
   function reset() { runId = null; items = []; render(); }
+
+  // 语言切换时按当前产物列表重渲染
+  onLocaleChange(() => render());
 
   render();
   return { loadRun, reset };

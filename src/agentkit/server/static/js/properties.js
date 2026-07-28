@@ -8,6 +8,7 @@
 import { el, replaceChildren, debounce } from './util.js';
 import { emit } from './store.js';
 import { CONTAINER_FIELDS } from './doc.js';
+import { t, onLocaleChange } from './i18n.js';
 
 /* 长文本字段(用 textarea + 等宽) */
 const TEXTAREA_FIELDS = new Set(['prompt', 'system', 'when', 'iter', 'template', 'content', 'skill']);
@@ -38,15 +39,15 @@ export function createProperties({ paneEl }) {
 
     const secs = [
       el('div.lf-form-sec', {},
-        el('div.lf-form-sec-head', {}, `节点 · ${step.type}`),
+        el('div.lf-form-sec-head', {}, t('props.nodeSection', { type: step.type })),
         fields.map((f) => fieldControl(step, normalizeField(f))),
       ),
       el('div.lf-form-sec', {},
-        el('div.lf-form-sec-head', {}, '备注'),
+        el('div.lf-form-sec-head', {}, t('props.note')),
         el('div.lf-field', {},
           el('textarea.lf-textarea', {
             rows: 2,
-            placeholder: '节点备注(保存在 ui.note,引擎忽略)',
+            placeholder: t('props.notePlaceholder'),
             oninput: debounce((e) => {
               step.ui = { ...(step.ui || {}), note: e.target.value };
               touch();
@@ -61,12 +62,12 @@ export function createProperties({ paneEl }) {
       const extraKeys = Object.keys(step).filter((k) => !known.has(k) && k !== 'ui');
       if (extraKeys.length) {
         secs.push(el('div.lf-form-sec', {},
-          el('div.lf-form-sec-head', {}, '扩展字段'),
+          el('div.lf-form-sec-head', {}, t('props.extraFields')),
           jsonArea(extraKeys.reduce((o, k) => (o[k] = step[k], o), {}), (val) => {
             for (const k of extraKeys) delete step[k];
             Object.assign(step, val);
           }),
-          el('div.lf-hint', {}, 'schema 之外的字段,JSON 编辑,保存时原样写入 YAML'),
+          el('div.lf-hint', {}, t('props.extraFieldsHint')),
         ));
       }
     }
@@ -134,9 +135,9 @@ export function createProperties({ paneEl }) {
     const sel = el('select.lf-select', {
       onchange: (e) => { step.tool = e.target.value; touch(); render(ctx); },
     },
-      el('option', { value: '' }, '(选择工具)'),
-      tools.map((t) => el('option', { value: t.name, ...(t.name === step.tool ? { selected: 'selected' } : {}) },
-        `${t.name}${t.description ? ` — ${t.description.slice(0, 30)}` : ''}`)),
+      el('option', { value: '' }, t('props.selectTool')),
+      tools.map((tool) => el('option', { value: tool.name, ...(tool.name === step.tool ? { selected: 'selected' } : {}) },
+        `${tool.name}${tool.description ? ` — ${tool.description.slice(0, 30)}` : ''}`)),
     );
     return sel;
   }
@@ -148,7 +149,7 @@ export function createProperties({ paneEl }) {
     if (!props) return null;
     const required = new Set(tool.param_model_schema.required || []);
     return el('div.lf-hint', {},
-      '参数: ' + Object.entries(props)
+      t('props.params') + Object.entries(props)
         .map(([k, v]) => `${k}${required.has(k) ? '*' : ''}:${v.type ?? 'any'}`).join(', '));
   }
 
@@ -170,16 +171,16 @@ export function createProperties({ paneEl }) {
     const docModel = ctx.docModel;
     replaceChildren(paneEl,
       el('div.lf-form-sec', {},
-        el('div.lf-form-sec-head', {}, '工作流'),
+        el('div.lf-form-sec-head', {}, t('props.workflow')),
         el('div.lf-field', {},
           el('div.lf-label', {}, el('span', {}, 'name')),
           el('input.lf-input.mono', { type: 'text', value: docModel.name ?? '', disabled: 'disabled' }),
-          el('div.lf-hint', {}, '名称 = 文件名,重命名请用「另存/新建」'),
+          el('div.lf-hint', {}, t('props.nameHint')),
         ),
         el('div.lf-field', {},
           el('div.lf-label', {}, el('span', {}, 'inputs'), el('span.ftype', {}, 'string[]')),
           listEditor(docModel.inputs || [], {
-            placeholder: '输入变量名,回车添加',
+            placeholder: t('props.inputPlaceholder'),
             onChange: (arr) => { docModel.inputs = arr; },
           }),
         ),
@@ -209,8 +210,8 @@ export function createProperties({ paneEl }) {
   function kvCard(obj, keys, onRemove) {
     return el('div.lf-kv-card', {},
       el('div.lf-kv-card-head', {},
-        el('b', {}, obj.name || '(未命名)'),
-        iconBtn('✕', '删除', onRemove),
+        el('b', {}, obj.name || t('props.unnamed')),
+        iconBtn('✕', t('props.delete'), onRemove),
       ),
       keys.map((k) => el('div.lf-field', {},
         el('div.lf-label', {}, el('span', {}, k)),
@@ -234,7 +235,7 @@ export function createProperties({ paneEl }) {
       replaceChildren(wrap,
         el('div.lf-node-io', {},
           arr.map((item, i) =>
-            el('span.lf-chip', { title: '点击删除' }, String(item),
+            el('span.lf-chip', { title: t('props.clickToDelete') }, String(item),
               el('button.lf-icon-btn', {
                 onclick: () => { arr.splice(i, 1); onChange([...arr]); touch(); redraw(); },
               }, '✕')),
@@ -274,11 +275,14 @@ export function createProperties({ paneEl }) {
     return ta;
   }
 
-  const addBtn = (onclick) => el('button.lf-icon-btn', { title: '添加', onclick }, '＋');
+  const addBtn = (onclick) => el('button.lf-icon-btn', { title: t('props.add'), onclick }, '＋');
   const iconBtn = (text, title, onclick) => el('button.lf-icon-btn', { title, onclick }, text);
 
   /** 标脏并广播编辑。 */
   function touch() { emit('doc', { kind: 'edit', source: 'props' }); }
+
+  // 语言切换时按当前上下文重渲染
+  onLocaleChange(() => { if (ctx) render(ctx); });
 
   return { render };
 }

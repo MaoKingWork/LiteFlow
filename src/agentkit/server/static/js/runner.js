@@ -10,6 +10,7 @@
 import { el, replaceChildren, fmtTime, fmtBytes, truncate, toast } from './util.js';
 import { emit } from './store.js';
 import * as api from './api.js';
+import { t, onLocaleChange } from './i18n.js';
 
 const TERMINAL_STATUS = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
 
@@ -24,6 +25,7 @@ export function createRunner({ paneEl, canvasApi, getDocModel, getWorkflowName, 
   let streams = new Map();      // stepId -> {text, reasoning, attempt, live, agent, model}
   let focusedStep = null;
   let inputsCache = new Map();  // workflowName -> {inputName: value}
+  let lastRuns = [];            // 缓存最近 run 列表,供语言切换重渲染
 
   /* DOM 骨架(一次性构建) */
   const controlsEl = el('div.lf-form-sec');
@@ -49,18 +51,18 @@ export function createRunner({ paneEl, canvasApi, getDocModel, getWorkflowName, 
   function renderControls() {
     const running = activeIsLive();
     replaceChildren(controlsEl,
-      el('div.lf-form-sec-head', {}, '运行控制',
+      el('div.lf-form-sec-head', {}, t('runner.control'),
         activeStatus ? el('span', { class: `lf-status-pill s-${activeStatus}` }, activeStatus) : null),
       el('div.lf-run-controls', {},
-        btn('▶ 运行', 'lf-btn lf-btn-run', start, { title: '以当前保存的工作流启动 run' }),
-        btn('中断', 'lf-btn', () => cancel('graceful'), { disabled: !running, title: '协作式取消:当前 step 完成后停止' }),
-        btn('硬中断', 'lf-btn lf-btn-danger', () => cancel('immediate'), { disabled: !running, title: '立即取消任务(asyncio.Task.cancel)' }),
-        btn('恢复', 'lf-btn', resume, {
+        btn(t('runner.run'), 'lf-btn lf-btn-run', start, { title: t('runner.runTitle') }),
+        btn(t('runner.cancel'), 'lf-btn', () => cancel('graceful'), { disabled: !running, title: t('runner.cancelTitle') }),
+        btn(t('runner.hardCancel'), 'lf-btn lf-btn-danger', () => cancel('immediate'), { disabled: !running, title: t('runner.hardCancelTitle') }),
+        btn(t('runner.resume'), 'lf-btn', resume, {
           disabled: !(activeRunId && ['interrupted', 'failed', 'cancelled'].includes(activeStatus)),
-          title: '从 checkpoint 断点续跑(跳过已完成 step)',
+          title: t('runner.resumeTitle'),
         }),
       ),
-      activeRunId ? el('div.lf-hint', {}, `run: ${activeRunId}`) : null,
+      activeRunId ? el('div.lf-hint', {}, t('runner.runId', { id: activeRunId })) : null,
     );
   }
 
@@ -77,17 +79,17 @@ export function createRunner({ paneEl, canvasApi, getDocModel, getWorkflowName, 
     const cache = inputsCache.get(wfName) || {};
     inputsCache.set(wfName, cache);
     replaceChildren(inputsEl,
-      el('div.lf-form-sec-head', {}, '输入变量'),
+      el('div.lf-form-sec-head', {}, t('runner.inputs')),
       names.length ? names.map((n) =>
         el('div.lf-field', {},
           el('div.lf-label', {}, el('span.mono', {}, n)),
           el('input.lf-input.mono', {
             type: 'text', value: cache[n] ?? '',
-            placeholder: `输入 ${n} 的值`,
+            placeholder: t('runner.inputPlaceholder', { name: n }),
             oninput: (e) => { cache[n] = e.target.value; },
           }),
         ),
-      ) : el('div.lf-hint', {}, '该工作流未声明 inputs'),
+      ) : el('div.lf-hint', {}, t('runner.noInputs')),
     );
   }
 
@@ -102,9 +104,10 @@ export function createRunner({ paneEl, canvasApi, getDocModel, getWorkflowName, 
   }
 
   function renderRunList(runs) {
+    lastRuns = runs || [];
     replaceChildren(runListEl,
-      el('div.lf-form-sec-head', {}, '运行历史',
-        el('button.lf-icon-btn', { title: '刷新', onclick: refreshRuns }, '⟳')),
+      el('div.lf-form-sec-head', {}, t('runner.history'),
+        el('button.lf-icon-btn', { title: t('runner.refresh'), onclick: refreshRuns }, '⟳')),
       runs.length ? el('div.lf-run-list', {},
         runs.slice(0, 30).map((r) =>
           el(`div.lf-run-item${r.run_id === activeRunId ? '.is-active' : ''}`, {
@@ -115,10 +118,10 @@ export function createRunner({ paneEl, canvasApi, getDocModel, getWorkflowName, 
               el('span', { class: `lf-status-pill s-${r.status}` }, r.status),
             ),
             el('div.lf-run-item-time', {},
-              `${fmtTime(r.started_at)}${r.is_active ? ' · live' : ''}${r.error ? ' · ' + truncate(r.error, 40) : ''}`),
+              `${fmtTime(r.started_at)}${r.is_active ? t('runner.liveSuffix') : ''}${r.error ? ' · ' + truncate(r.error, 40) : ''}`),
           ),
         ),
-      ) : el('div.lf-empty-hint', {}, '暂无运行记录'),
+      ) : el('div.lf-empty-hint', {}, t('runner.noRuns')),
     );
   }
 
@@ -129,10 +132,10 @@ export function createRunner({ paneEl, canvasApi, getDocModel, getWorkflowName, 
     const inputs = { ...(inputsCache.get(wfName) || {}) };
     try {
       const { run_id } = await api.startRun(wfName, inputs);
-      toast(`已启动 ${run_id}`, 'ok');
+      toast(t('toast.started', { id: run_id }), 'ok');
       view(run_id);
     } catch (e) {
-      toast(`启动失败: ${e.message}`, 'err');
+      toast(t('toast.startFailed', { msg: e.message }), 'err');
     }
   }
 
@@ -140,9 +143,9 @@ export function createRunner({ paneEl, canvasApi, getDocModel, getWorkflowName, 
     if (!activeRunId) return;
     try {
       await api.cancelRun(activeRunId, mode);
-      toast(mode === 'graceful' ? '已请求协作式中断' : '已硬中断', 'ok');
+      toast(mode === 'graceful' ? t('toast.cancelGraceful') : t('toast.cancelHard'), 'ok');
     } catch (e) {
-      toast(`中断失败: ${e.message}`, 'err');
+      toast(t('toast.cancelFailed', { msg: e.message }), 'err');
     }
   }
 
@@ -150,10 +153,10 @@ export function createRunner({ paneEl, canvasApi, getDocModel, getWorkflowName, 
     if (!activeRunId) return;
     try {
       const { run_id } = await api.resumeRun(activeRunId);
-      toast(`已恢复为 ${run_id}`, 'ok');
+      toast(t('toast.resumed', { id: run_id }), 'ok');
       view(run_id);
     } catch (e) {
-      toast(`恢复失败: ${e.message}`, 'err');
+      toast(t('toast.resumeFailed', { msg: e.message }), 'err');
     }
   }
 
@@ -166,7 +169,7 @@ export function createRunner({ paneEl, canvasApi, getDocModel, getWorkflowName, 
     streams = new Map();
     focusedStep = null;
     canvasApi.applyRunStatus(stepStatus);
-    replaceChildren(timelineEl, el('div.lf-form-sec-head', {}, '事件流'));
+    replaceChildren(timelineEl, el('div.lf-form-sec-head', {}, t('runner.events')));
     renderControls();
     renderStreamView();
     emit('run:view', { runId });
@@ -184,7 +187,7 @@ export function createRunner({ paneEl, canvasApi, getDocModel, getWorkflowName, 
       case 'run_started':
         activeStatus = 'running';
         renderControls();
-        addTimeline(ev, `工作流 ${payload.workflow_name || ''} 开始`);
+        addTimeline(ev, t('runner.wfStarted', { name: payload.workflow_name || '' }));
         break;
       case 'run_completed':
       case 'run_failed':
@@ -192,13 +195,13 @@ export function createRunner({ paneEl, canvasApi, getDocModel, getWorkflowName, 
       case 'run_interrupted':
         activeStatus = (payload.status || type.replace('run_', ''));
         renderControls();
-        addTimeline(ev, payload.error ? `错误: ${truncate(payload.error, 80)}` : `运行${activeStatus}`, type === 'run_failed');
+        addTimeline(ev, payload.error ? t('runner.errorPrefix', { msg: truncate(payload.error, 80) }) : t('runner.runStatus', { status: activeStatus }), type === 'run_failed');
         refreshRuns();
         break;
       case 'run_cancelling':
         activeStatus = 'cancelling';
         renderControls();
-        addTimeline(ev, '取消中…');
+        addTimeline(ev, t('runner.cancelling'));
         break;
       case 'step_started':
         stepStatus.set(sid, { status: 'running' });
@@ -241,7 +244,7 @@ export function createRunner({ paneEl, canvasApi, getDocModel, getWorkflowName, 
         addTimeline(ev, `${payload.name}${payload.mcp_server ? '@' + payload.mcp_server : ''} → ${payload.status}`, payload.status === 'error');
         break;
       case 'artifact_produced':
-        addTimeline(ev, `产物: ${payload.id} (${fmtBytes(payload.size)})`);
+        addTimeline(ev, t('runner.artifactProduced', { id: payload.id, size: fmtBytes(payload.size) }));
         emit('artifact:new', { runId: activeRunId, artifact: payload });
         break;
     }
@@ -252,7 +255,7 @@ export function createRunner({ paneEl, canvasApi, getDocModel, getWorkflowName, 
   function addTimeline(ev, msg, isErr = false) {
     if (!timelineBox || !timelineBox.isConnected) {
       timelineBox = el('div.lf-timeline');
-      replaceChildren(timelineEl, el('div.lf-form-sec-head', {}, '事件流'), timelineBox);
+      replaceChildren(timelineEl, el('div.lf-form-sec-head', {}, t('runner.events')), timelineBox);
     }
     const item = el(`div.lf-ev.t-${ev.type}${isErr ? '.is-err' : ''}`, {},
       el('span.lf-ev-seq', {}, String(ev.seq ?? '')),
@@ -274,7 +277,7 @@ export function createRunner({ paneEl, canvasApi, getDocModel, getWorkflowName, 
 
   function renderStreamView() {
     replaceChildren(streamEl,
-      el('div.lf-form-sec-head', {}, 'LLM 流式输出',
+      el('div.lf-form-sec-head', {}, t('runner.llmStream'),
         streams.size > 1 ? el('select.lf-select', {
           style: 'width:140px;height:22px;font-size:11px',
           onchange: (e) => { focusedStep = e.target.value; paintStream(); },
@@ -285,7 +288,7 @@ export function createRunner({ paneEl, canvasApi, getDocModel, getWorkflowName, 
       el('div.lf-stream-box', {},
         el('div.lf-stream-head', { dataset: { role: 'head' } }),
         el('div.lf-stream-body', { dataset: { role: 'body' } },
-          el('span.lf-hint', {}, '运行 LLM 节点后此处显示流式输出')),
+          el('span.lf-hint', {}, t('runner.streamPlaceholder'))),
       ),
     );
   }
@@ -300,8 +303,8 @@ export function createRunner({ paneEl, canvasApi, getDocModel, getWorkflowName, 
       el('span.mono', {}, focusedStep),
       s.agent ? el('span', {}, `agent: ${s.agent}`) : null,
       s.model ? el('span', {}, s.model) : null,
-      s.live ? el('span', { style: 'color:var(--accent)' }, '● 流式中') : el('span', { style: 'color:var(--ok)' }, '✓ 完成'),
-      el('span.mono', {}, `${s.text.length} chars`),
+      s.live ? el('span', { style: 'color:var(--accent)' }, t('runner.streaming')) : el('span', { style: 'color:var(--ok)' }, t('runner.done')),
+      el('span.mono', {}, t('runner.chars', { n: s.text.length })),
     );
     replaceChildren(body,
       s.reasoning ? el('div.lf-stream-reasoning', {}, s.reasoning) : null,
@@ -314,6 +317,14 @@ export function createRunner({ paneEl, canvasApi, getDocModel, getWorkflowName, 
   /* ── 对外 ─────────────────────────────────────────────────── */
   function activate() { setVisible(true); }
   function deactivate() { setVisible(false); }
+
+  // 语言切换时重渲染各静态区块(运行态数据由事件流持续刷新,无需重放)
+  onLocaleChange(() => {
+    renderControls();
+    renderInputsForm();
+    renderStreamView();
+    renderRunList(lastRuns);
+  });
 
   renderControls();
   renderInputsForm();

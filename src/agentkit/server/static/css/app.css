@@ -6,6 +6,15 @@
    - 文字 #FFFFFF / 次级 #98989D / 间距 8px 倍数
    ═══════════════════════════════════════════════════════════════════ */
 
+/* ── 内嵌字体: OPPO Sans (由 /fonts/ 静态路由提供) ─────────────── */
+@font-face {
+  font-family: "OPPO Sans";
+  src: url("/fonts/OPPO%20Sans%204.0.ttf") format("truetype");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   --bg: #121212;
   --surface: #1E1E1E;
@@ -25,7 +34,7 @@
   --text-3: #636366;
   --radius: 16px;
   --radius-s: 10px;
-  --font: "Inter", "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font: "OPPO Sans", "Inter", "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
   --mono: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
 }
 
@@ -61,6 +70,15 @@ body {
 .lf-dirty-dot { color: var(--warn); font-size: 10px; }
 .lf-topbar-actions { display: flex; align-items: center; gap: 8px; }
 .lf-topbar-sep { width: 1px; height: 20px; background: var(--border); }
+.lf-lang-switch {
+  height: 30px; padding: 0 8px;
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px;
+  font: 500 12px var(--font); cursor: pointer; outline: none;
+  transition: border-color .15s, background .15s;
+}
+.lf-lang-switch:hover { border-color: var(--accent); }
+.lf-lang-switch:focus { border-color: var(--accent); }
 .lf-conn { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); margin-left: 8px; }
 .lf-conn.is-ok { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
 .lf-conn.is-bad { background: var(--alert); box-shadow: 0 0 6px var(--alert); }

@@ -5,6 +5,8 @@
    支持 Last-Event-ID 续传),不依赖 EventSource。
 */
 
+import { t } from './i18n.js';
+
 class ApiError extends Error {
   constructor(status, detail, body) {
     super(detail || `HTTP ${status}`);
@@ -37,7 +39,7 @@ async function request(method, url, { body, headers } = {}) {
   });
   if (resp.status === 401) {
     // 未鉴权:抛出带标记的错误,由上层弹 token 输入
-    throw new ApiError(401, '需要访问令牌(token)', null);
+    throw new ApiError(401, t('api.needToken'), null);
   }
   const text = await resp.text();
   let data = null;
@@ -104,7 +106,7 @@ export const listArtifacts = (runId) => get(`/api/runs/${encodeURIComponent(runI
 export async function fetchArtifactBlob(runId, artifactId) {
   const resp = await fetch(`/api/artifacts/${encodeURIComponent(runId)}/${encodeURIComponent(artifactId)}`,
     { headers: authHeaders() });
-  if (!resp.ok) throw new ApiError(resp.status, `产物下载失败 HTTP ${resp.status}`, null);
+  if (!resp.ok) throw new ApiError(resp.status, t('api.artifactDownloadFailed', { status: resp.status }), null);
   return resp.blob();
 }
 
