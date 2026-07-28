@@ -243,6 +243,34 @@ async def test_sse_endpoint_unknown_run_404(tmp_path):
         assert resp.status_code == 404
 
 
+# ---------------------------------------------------------------------------
+# 静态前端挂载
+# ---------------------------------------------------------------------------
+def test_static_frontend_mounted(tmp_path):
+    """GET / 返回可视化前端 index.html;静态资源可达。"""
+    app = create_app(str(tmp_path), settings=_make_settings(tmp_path))
+    with TestClient(app) as client:
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert "LiteFlow" in resp.text
+        assert "text/html" in resp.headers.get("content-type", "")
+        # 静态 JS 模块可达
+        js = client.get("/js/main.js")
+        assert js.status_code == 200
+        # CSS 可达
+        css = client.get("/css/app.css")
+        assert css.status_code == 200
+
+
+def test_static_mount_does_not_shadow_api(tmp_path):
+    """挂载 / 不影响 API 与 health 路由匹配。"""
+    app = create_app(str(tmp_path), settings=_make_settings(tmp_path))
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+        assert client.get("/api/workflows").status_code == 200
+        assert client.get("/api/meta/step-types").status_code == 200
+
+
 async def test_sse_endpoint_finished_run(tmp_path):
     """GET /api/runs/{finished}/events → 200 SSE 流（run 已结束,仅回放历史）。"""
     from agentkit.runtime.event import EventLog, EventType, RunEvent

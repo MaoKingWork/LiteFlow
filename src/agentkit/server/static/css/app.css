@@ -1,0 +1,396 @@
+/* ═══════════════════════════════════════════════════════════════════
+   LiteFlow Studio — 设计系统
+   依据 DESIGN.md:深色系技术仪表盘("Power BI Dashboard" 氛围)
+   - 背景 #121212 / 卡片 #1E1E1E / 边框 #2C2C2E / 圆角 16px
+   - 主强调 #00E5FF(青) / 告警 #FF453A(红) / 正常 #32D74B(绿)
+   - 文字 #FFFFFF / 次级 #98989D / 间距 8px 倍数
+   ═══════════════════════════════════════════════════════════════════ */
+
+:root {
+  --bg: #121212;
+  --surface: #1E1E1E;
+  --surface-2: #252525;
+  --border: #2C2C2E;
+  --accent: #00E5FF;
+  --accent-dim: rgba(0, 229, 255, .12);
+  --alert: #FF453A;
+  --alert-bg: #3A1C1C;
+  --ok: #32D74B;
+  --ok-dim: rgba(50, 215, 75, .12);
+  --warn: #FF9F0A;
+  --violet: #BF5AF2;
+  --blue: #0A84FF;
+  --text: #FFFFFF;
+  --text-2: #98989D;
+  --text-3: #636366;
+  --radius: 16px;
+  --radius-s: 10px;
+  --font: "Inter", "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --mono: "JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body, #app { height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  overflow: hidden;
+}
+.mono { font-family: var(--mono); }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: #3A3A3C; border-radius: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ── 布局骨架 ─────────────────────────────────────────────────── */
+.lf-app { display: flex; flex-direction: column; height: 100%; }
+.lf-body { display: flex; flex: 1; min-height: 0; }
+
+/* ── 顶栏 ─────────────────────────────────────────────────────── */
+.lf-topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  height: 48px; padding: 0 16px; flex: none;
+  background: var(--surface); border-bottom: 1px solid var(--border);
+}
+.lf-topbar-left { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.lf-logo { display: flex; align-items: center; gap: 8px; color: var(--accent); font-size: 15px; }
+.lf-logo b { color: var(--text); font-weight: 600; }
+.lf-logo-sub { color: var(--text-2); font-size: 12px; font-weight: 400; }
+.lf-wf-name { color: var(--text-2); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 320px; }
+.lf-dirty-dot { color: var(--warn); font-size: 10px; }
+.lf-topbar-actions { display: flex; align-items: center; gap: 8px; }
+.lf-topbar-sep { width: 1px; height: 20px; background: var(--border); }
+.lf-conn { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); margin-left: 8px; }
+.lf-conn.is-ok { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+.lf-conn.is-bad { background: var(--alert); box-shadow: 0 0 6px var(--alert); }
+
+/* ── 按钮 ─────────────────────────────────────────────────────── */
+.lf-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 30px; padding: 0 14px;
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px;
+  font: 500 13px var(--font); cursor: pointer;
+  transition: border-color .15s, background .15s, color .15s;
+}
+.lf-btn:hover { border-color: var(--accent); color: var(--accent); }
+.lf-btn:disabled { opacity: .45; cursor: not-allowed; }
+.lf-btn:disabled:hover { border-color: var(--border); color: var(--text); }
+.lf-btn-primary { background: var(--accent-dim); border-color: rgba(0,229,255,.4); color: var(--accent); }
+.lf-btn-primary:hover { background: rgba(0,229,255,.2); }
+.lf-btn-run { background: var(--ok-dim); border-color: rgba(50,215,75,.4); color: var(--ok); }
+.lf-btn-run:hover { background: rgba(50,215,75,.2); border-color: var(--ok); color: var(--ok); }
+.lf-btn-danger { background: var(--alert-bg); border-color: rgba(255,69,58,.4); color: var(--alert); }
+.lf-btn-danger:hover { border-color: var(--alert); }
+.lf-icon-btn {
+  width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; color: var(--text-2); border: none; border-radius: 6px;
+  font-size: 13px; cursor: pointer;
+}
+.lf-icon-btn:hover { background: var(--surface-2); color: var(--text); }
+
+/* ── 左栏 ─────────────────────────────────────────────────────── */
+.lf-sidebar {
+  width: 224px; flex: none; display: flex; flex-direction: column;
+  background: var(--surface); border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+.lf-side-section { padding: 12px; display: flex; flex-direction: column; }
+.lf-side-grow { flex: 1; min-height: 0; }
+.lf-side-head {
+  display: flex; align-items: center; justify-content: space-between;
+  color: var(--text-2); font-size: 12px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .06em; margin-bottom: 8px;
+}
+
+.lf-wf-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+.lf-wf-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border-radius: var(--radius-s);
+  color: var(--text-2); font-size: 13px; cursor: pointer;
+  border: 1px solid transparent;
+}
+.lf-wf-item:hover { background: var(--surface-2); color: var(--text); }
+.lf-wf-item.is-active { background: var(--accent-dim); border-color: rgba(0,229,255,.3); color: var(--accent); }
+.lf-wf-item .lf-wf-item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 12px; }
+.lf-wf-item .lf-icon-btn { visibility: hidden; width: 20px; height: 20px; }
+.lf-wf-item:hover .lf-icon-btn { visibility: visible; }
+
+.lf-palette { display: flex; flex-direction: column; gap: 6px; }
+.lf-pal-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 10px; border-radius: var(--radius-s);
+  background: var(--surface-2); border: 1px solid var(--border);
+  cursor: grab; user-select: none;
+}
+.lf-pal-item:hover { border-color: var(--node-c, var(--accent)); }
+.lf-pal-item:active { cursor: grabbing; }
+.lf-pal-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--node-c, var(--accent)); flex: none; }
+.lf-pal-name { font-family: var(--mono); font-size: 12px; }
+.lf-pal-kind { margin-left: auto; color: var(--text-3); font-size: 11px; }
+
+/* ── 画布 ─────────────────────────────────────────────────────── */
+.lf-canvas-wrap { flex: 1; min-width: 0; overflow: auto; }
+.lf-canvas {
+  min-height: 100%; padding: 32px 24px 96px;
+  display: flex; flex-direction: column; align-items: center;
+  outline: none;
+  background-image: radial-gradient(circle, #232326 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+.lf-canvas-empty { color: var(--text-3); margin: 64px auto; text-align: center; line-height: 1.8; }
+
+/* 序列容器:纵向流 */
+.lf-seq { display: flex; flex-direction: column; align-items: center; width: 100%; }
+.lf-dropzone {
+  width: 2px; height: 24px; position: relative; flex: none;
+  display: flex; align-items: center; justify-content: center;
+}
+.lf-dropzone::before {
+  content: ""; width: 2px; height: 100%; background: #3A3A3C; border-radius: 1px;
+  transition: background .15s;
+}
+.lf-dropzone::after {
+  content: "+"; position: absolute; left: 50%; top: 50%;
+  transform: translate(-50%, -50%) scale(0);
+  width: 18px; height: 18px; border-radius: 50%;
+  background: var(--accent); color: #00343b;
+  font: 700 12px/18px var(--font); text-align: center;
+  transition: transform .15s;
+}
+.lf-dropzone:hover::after, .lf-dropzone.is-over::after { transform: translate(-50%, -50%) scale(1); }
+.lf-dropzone.is-over::before { background: var(--accent); }
+.lf-dropzone.is-first { height: 16px; }
+.lf-dropzone.is-last { height: 32px; }
+
+/* 节点卡片(对齐 DESIGN.md 卡片规范) */
+.lf-node {
+  width: 420px; max-width: 92%;
+  background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 12px 16px; position: relative;
+  cursor: pointer; flex: none;
+  transition: border-color .15s, box-shadow .15s, transform .1s;
+}
+.lf-node:hover { border-color: #3D3D40; }
+.lf-node.is-selected { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+.lf-node.is-dragging { opacity: .4; }
+.lf-node-head { display: flex; align-items: center; gap: 8px; }
+.lf-node-badge {
+  flex: none; padding: 2px 8px; border-radius: 6px;
+  font: 600 11px var(--mono);
+  color: var(--node-c, var(--accent));
+  background: color-mix(in srgb, var(--node-c, var(--accent)) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--node-c, var(--accent)) 40%, transparent);
+}
+.lf-node-id { font: 600 13px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lf-node-actions { margin-left: auto; display: flex; gap: 2px; visibility: hidden; }
+.lf-node:hover .lf-node-actions { visibility: visible; }
+.lf-node-summary {
+  margin-top: 6px; color: var(--text-2); font-size: 12px; line-height: 1.5;
+  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  word-break: break-all;
+}
+.lf-node-io { margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap; }
+.lf-chip {
+  padding: 1px 8px; border-radius: 999px; font: 500 11px var(--mono);
+  background: var(--surface-2); border: 1px solid var(--border); color: var(--text-2);
+}
+.lf-chip-out { color: var(--ok); border-color: rgba(50,215,75,.3); }
+.lf-node-note-flag { color: var(--warn); flex: none; }
+
+/* 运行状态着色 */
+.lf-status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); flex: none; }
+.lf-node.st-running { border-color: var(--accent); }
+.lf-node.st-running .lf-status-dot { background: var(--accent); animation: lf-pulse 1s ease-in-out infinite; }
+.lf-node.st-success .lf-status-dot { background: var(--ok); }
+.lf-node.st-failed { border-color: var(--alert); }
+.lf-node.st-failed .lf-status-dot { background: var(--alert); }
+.lf-node.st-cancelled .lf-status-dot { background: var(--warn); }
+.lf-node.st-skipped .lf-status-dot { background: var(--text-3); }
+@keyframes lf-pulse { 50% { opacity: .3; } }
+.lf-node-meta { margin-top: 6px; display: none; gap: 10px; color: var(--text-3); font: 11px var(--mono); }
+.lf-node.st-success .lf-node-meta, .lf-node.st-failed .lf-node-meta { display: flex; }
+
+/* 容器节点内嵌区 */
+.lf-nest { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 10px; display: flex; flex-direction: column; gap: 10px; }
+.lf-nest-label { color: var(--text-3); font: 600 10px var(--font); text-transform: uppercase; letter-spacing: .08em; margin-bottom: 4px; }
+.lf-nest-zone {
+  border: 1px dashed #3A3A3C; border-radius: var(--radius-s);
+  padding: 8px; min-height: 40px;
+  display: flex; flex-direction: column; align-items: center;
+  transition: border-color .15s, background .15s;
+}
+.lf-nest-zone.is-over { border-color: var(--accent); background: var(--accent-dim); }
+.lf-nest-empty { color: var(--text-3); font-size: 11px; padding: 8px; }
+.lf-nest .lf-node { width: 100%; }
+.lf-nest-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.lf-nest-cols .lf-nest-zone { min-width: 0; }
+.lf-node.is-container { width: 520px; max-width: 96%; }
+.lf-node.is-collapsed .lf-nest { display: none; }
+.lf-node.is-collapsed .lf-node-summary { display: none; }
+
+/* ── 右栏 ─────────────────────────────────────────────────────── */
+.lf-right {
+  width: 360px; flex: none; display: flex; flex-direction: column;
+  background: var(--surface); border-left: 1px solid var(--border);
+}
+.lf-tabs { display: flex; flex: none; border-bottom: 1px solid var(--border); }
+.lf-tab {
+  flex: 1; padding: 10px 0; background: transparent; border: none;
+  color: var(--text-2); font: 500 13px var(--font); cursor: pointer;
+  border-bottom: 2px solid transparent; position: relative;
+}
+.lf-tab:hover { color: var(--text); }
+.lf-tab.is-active { color: var(--accent); border-bottom-color: var(--accent); }
+.lf-badge {
+  position: absolute; top: 6px; margin-left: 4px; min-width: 16px; height: 16px;
+  border-radius: 8px; background: var(--alert); color: #fff;
+  font: 700 10px/16px var(--mono); padding: 0 4px;
+}
+.lf-tabpanes { flex: 1; min-height: 0; position: relative; }
+.lf-pane { position: absolute; inset: 0; overflow-y: auto; padding: 16px; display: none; }
+.lf-pane.is-active { display: block; }
+
+/* 属性表单 */
+.lf-form-sec { margin-bottom: 20px; }
+.lf-form-sec-head {
+  color: var(--text-2); font-size: 12px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .06em; margin-bottom: 8px;
+  display: flex; align-items: center; justify-content: space-between;
+}
+.lf-field { margin-bottom: 12px; }
+.lf-label { display: flex; gap: 6px; align-items: baseline; color: var(--text-2); font-size: 12px; margin-bottom: 4px; }
+.lf-label .req { color: var(--alert); }
+.lf-label .ftype { color: var(--text-3); font: 10px var(--mono); margin-left: auto; }
+.lf-input, .lf-textarea, .lf-select {
+  width: 100%; padding: 7px 10px;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px;
+  font: 400 13px var(--font); outline: none;
+  transition: border-color .15s;
+}
+.lf-input:focus, .lf-textarea:focus, .lf-select:focus { border-color: var(--accent); }
+.lf-input.mono, .lf-textarea.mono { font-family: var(--mono); font-size: 12px; }
+.lf-textarea { min-height: 88px; resize: vertical; line-height: 1.5; }
+.lf-check-row { display: flex; align-items: center; gap: 8px; color: var(--text-2); font-size: 13px; }
+.lf-hint { color: var(--text-3); font-size: 11px; margin-top: 4px; line-height: 1.5; }
+.lf-kv-card {
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-s);
+  padding: 10px; margin-bottom: 8px;
+}
+.lf-kv-card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.lf-kv-card-head b { font: 600 12px var(--mono); color: var(--accent); flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.lf-empty-hint { color: var(--text-3); text-align: center; padding: 24px 8px; font-size: 12px; line-height: 1.8; }
+
+/* 运行面板 */
+.lf-run-controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.lf-run-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
+.lf-run-item {
+  padding: 8px 10px; border-radius: var(--radius-s);
+  background: var(--surface-2); border: 1px solid var(--border);
+  cursor: pointer; font-size: 12px;
+}
+.lf-run-item:hover { border-color: #3D3D40; }
+.lf-run-item.is-active { border-color: var(--accent); }
+.lf-run-item-top { display: flex; align-items: center; gap: 8px; }
+.lf-run-item-id { font: 600 11px var(--mono); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lf-run-item-time { color: var(--text-3); font: 10px var(--mono); margin-top: 4px; }
+.lf-status-pill {
+  flex: none; padding: 1px 8px; border-radius: 999px; font: 600 10px var(--mono);
+}
+.lf-status-pill.s-running { color: var(--accent); background: var(--accent-dim); }
+.lf-status-pill.s-completed { color: var(--ok); background: var(--ok-dim); }
+.lf-status-pill.s-failed { color: var(--alert); background: var(--alert-bg); }
+.lf-status-pill.s-cancelled, .lf-status-pill.s-cancelling { color: var(--warn); background: rgba(255,159,10,.12); }
+.lf-status-pill.s-interrupted { color: var(--violet); background: rgba(191,90,242,.12); }
+.lf-status-pill.s-pending { color: var(--text-2); background: var(--surface-2); }
+
+/* 事件时间线 */
+.lf-timeline { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+.lf-ev { display: flex; gap: 8px; padding: 4px 6px; border-radius: 6px; align-items: baseline; }
+.lf-ev:hover { background: var(--surface-2); }
+.lf-ev-seq { color: var(--text-3); font: 10px var(--mono); width: 32px; flex: none; text-align: right; }
+.lf-ev-type { font: 600 11px var(--mono); width: 128px; flex: none; overflow: hidden; text-overflow: ellipsis; }
+.lf-ev-msg { color: var(--text-2); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lf-ev.t-run_completed .lf-ev-type { color: var(--ok); }
+.lf-ev.t-run_failed .lf-ev-type, .lf-ev.t-step_finished.is-err .lf-ev-type { color: var(--alert); }
+.lf-ev.t-run_started .lf-ev-type, .lf-ev.t-step_started .lf-ev-type { color: var(--accent); }
+.lf-ev.t-artifact_produced .lf-ev-type { color: var(--ok); }
+.lf-ev.t-tool_call .lf-ev-type { color: var(--blue); }
+
+/* LLM 流式视图 */
+.lf-stream-box {
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-s);
+  padding: 10px; margin-top: 8px;
+}
+.lf-stream-head { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; color: var(--text-2); font-size: 11px; }
+.lf-stream-body {
+  font: 12px/1.6 var(--mono); color: var(--text);
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 240px; overflow-y: auto;
+}
+.lf-stream-body .cursor { display: inline-block; width: 7px; height: 14px; background: var(--accent); vertical-align: -2px; animation: lf-pulse 1s infinite; }
+.lf-stream-reasoning { color: var(--text-3); font-style: italic; }
+
+/* 产物面板 */
+.lf-art-list { display: flex; flex-direction: column; gap: 8px; }
+.lf-art-item {
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-s);
+  padding: 10px 12px; display: flex; align-items: center; gap: 10px;
+}
+.lf-art-icon { color: var(--accent); flex: none; }
+.lf-art-name { font: 600 12px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lf-art-meta { color: var(--text-3); font: 10px var(--mono); margin-top: 2px; }
+.lf-art-body { flex: 1; min-width: 0; }
+.lf-art-item .lf-btn { height: 26px; padding: 0 10px; font-size: 12px; }
+
+/* 诊断面板 */
+.lf-diag-item {
+  padding: 10px 12px; border-radius: var(--radius-s); margin-bottom: 8px;
+  background: var(--alert-bg); border-left: 4px solid var(--alert);
+  font-size: 12px; cursor: pointer;
+}
+.lf-diag-item.sev-warning { background: rgba(255,159,10,.08); border-left-color: var(--warn); }
+.lf-diag-code { font: 600 11px var(--mono); color: var(--alert); }
+.lf-diag-item.sev-warning .lf-diag-code { color: var(--warn); }
+.lf-diag-path { font: 10px var(--mono); color: var(--text-2); margin-top: 2px; }
+.lf-diag-msg { margin-top: 4px; line-height: 1.5; }
+.lf-diag-ok {
+  padding: 12px; border-radius: var(--radius-s); text-align: center;
+  background: var(--ok-dim); color: var(--ok); font-size: 13px;
+}
+
+/* ── 模态 ─────────────────────────────────────────────────────── */
+.lf-modal-root { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; }
+.lf-modal-root[hidden] { display: none; }
+.lf-modal-mask { position: absolute; inset: 0; background: rgba(0,0,0,.6); backdrop-filter: blur(2px); }
+.lf-modal {
+  position: relative; width: min(960px, 92vw); height: min(720px, 88vh);
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.lf-modal-head {
+  display: flex; align-items: center; gap: 12px; flex: none;
+  padding: 12px 16px; border-bottom: 1px solid var(--border);
+}
+.lf-modal-title { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lf-modal-actions { display: flex; gap: 8px; }
+.lf-modal-body { flex: 1; min-height: 0; overflow: auto; padding: 16px; }
+.lf-modal-body iframe { width: 100%; height: 100%; min-height: 560px; border: none; background: #fff; border-radius: var(--radius-s); }
+.lf-modal-body pre { font: 12px/1.6 var(--mono); white-space: pre-wrap; word-break: break-word; }
+.lf-modal-body img { max-width: 100%; border-radius: var(--radius-s); }
+
+/* ── Toast ────────────────────────────────────────────────────── */
+.lf-toast-root { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 200; display: flex; flex-direction: column; gap: 8px; align-items: center; }
+.lf-toast {
+  padding: 10px 20px; border-radius: 10px; font-size: 13px;
+  background: var(--surface); border: 1px solid var(--border);
+  box-shadow: 0 8px 24px rgba(0,0,0,.5);
+  animation: lf-toast-in .2s ease-out;
+  max-width: 70vw;
+}
+.lf-toast.ok { border-color: rgba(50,215,75,.5); color: var(--ok); }
+.lf-toast.err { border-color: rgba(255,69,58,.5); color: var(--alert); }
+@keyframes lf-toast-in { from { opacity: 0; transform: translateY(8px); } }

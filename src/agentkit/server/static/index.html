@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LiteFlow Studio</title>
+<link rel="stylesheet" href="./css/app.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path fill='%2300E5FF' d='M13 2 3 14h7l-1 8 10-12h-7l1-8z'/></svg>">
+</head>
+<body>
+<div id="app" class="lf-app">
+
+  <!-- ══════════ 顶栏 ══════════ -->
+  <header class="lf-topbar">
+    <div class="lf-topbar-left">
+      <span class="lf-logo" title="LiteFlow Studio">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>
+        <b>LiteFlow</b><span class="lf-logo-sub">Studio</span>
+      </span>
+      <span id="wf-name" class="lf-wf-name mono">—</span>
+      <span id="wf-dirty" class="lf-dirty-dot" title="有未保存修改" hidden>●</span>
+    </div>
+    <div class="lf-topbar-actions">
+      <button id="btn-validate" class="lf-btn" title="静态校验 (Ctrl+Shift+V)">校验</button>
+      <button id="btn-save" class="lf-btn lf-btn-primary" title="保存 (Ctrl+S)">保存</button>
+      <span class="lf-topbar-sep"></span>
+      <button id="btn-import" class="lf-btn" title="导入 YAML / JSON">导入</button>
+      <button id="btn-export" class="lf-btn" title="导出 YAML">导出</button>
+      <span class="lf-topbar-sep"></span>
+      <button id="btn-run" class="lf-btn lf-btn-run" title="运行当前工作流">
+        <svg viewBox="0 0 24 24" width="12" height="12"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
+        运行
+      </button>
+      <span id="conn-status" class="lf-conn" title="服务连接状态"></span>
+    </div>
+  </header>
+
+  <div class="lf-body">
+    <!-- ══════════ 左栏:工作流列表 + 节点面板 ══════════ -->
+    <aside class="lf-sidebar">
+      <section class="lf-side-section">
+        <div class="lf-side-head">
+          <span>工作流</span>
+          <button id="btn-new-wf" class="lf-icon-btn" title="新建工作流">＋</button>
+        </div>
+        <div id="wf-list" class="lf-wf-list"></div>
+      </section>
+      <section class="lf-side-section lf-side-grow">
+        <div class="lf-side-head"><span>节点</span></div>
+        <div id="palette" class="lf-palette"></div>
+      </section>
+    </aside>
+
+    <!-- ══════════ 中央画布 ══════════ -->
+    <main class="lf-canvas-wrap">
+      <div id="canvas" class="lf-canvas" tabindex="0"></div>
+    </main>
+
+    <!-- ══════════ 右栏:属性 / 运行 / 产物 / 诊断 ══════════ -->
+    <aside class="lf-right">
+      <nav class="lf-tabs">
+        <button class="lf-tab is-active" data-tab="props">属性</button>
+        <button class="lf-tab" data-tab="run">运行</button>
+        <button class="lf-tab" data-tab="artifacts">产物</button>
+        <button class="lf-tab" data-tab="diag">诊断<span id="diag-badge" class="lf-badge" hidden></span></button>
+      </nav>
+      <div class="lf-tabpanes">
+        <section id="pane-props" class="lf-pane is-active"></section>
+        <section id="pane-run" class="lf-pane"></section>
+        <section id="pane-artifacts" class="lf-pane"></section>
+        <section id="pane-diag" class="lf-pane"></section>
+      </div>
+    </aside>
+  </div>
+
+  <!-- ══════════ 产物预览 / 通用模态 ══════════ -->
+  <div id="modal-root" class="lf-modal-root" hidden>
+    <div class="lf-modal-mask" data-close></div>
+    <div class="lf-modal">
+      <div class="lf-modal-head">
+        <span id="modal-title" class="lf-modal-title mono"></span>
+        <div class="lf-modal-actions" id="modal-actions"></div>
+        <button class="lf-icon-btn" data-close title="关闭">✕</button>
+      </div>
+      <div id="modal-body" class="lf-modal-body"></div>
+    </div>
+  </div>
+
+  <div id="toast-root" class="lf-toast-root"></div>
+  <input id="import-file" type="file" accept=".yaml,.yml,.json" hidden>
+</div>
+<script type="module" src="./js/main.js"></script>
+</body>
+</html>
